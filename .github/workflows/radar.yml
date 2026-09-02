@@ -1,0 +1,67 @@
+name: AI Radar
+
+on:
+  schedule:
+    # Every 6 hours. GitHub queues cron jobs under load, so the exact minute
+    # drifts; the 8h lookback window in config.py absorbs that.
+    - cron: '5 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build the bulletin but do not post'
+        type: boolean
+        default: false
+      limit:
+        description: 'Number of stories'
+        default: '9'
+
+# Two runs writing data/seen.json at once would lose fingerprints and repost
+# stories, so overlapping runs are refused rather than queued.
+concurrency:
+  group: ai-radar
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # No third-party dependencies: stdlib only, so there is nothing to
+      # install and no supply-chain surface. Tests use pytest only.
+      - name: Run offline tests
+        run: |
+          pip install --quiet pytest==8.3.4
+          python -m pytest tests/ -q
+
+      - name: Publish bulletin
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        run: |
+          python -m radar.run \
+            --limit "${{ github.event.inputs.limit || 9 }}" \
+            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+
+      - name: Commit published-state
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/seen.json
+          if git diff --cached --quiet; then
+            echo "no state change"
+          else
+            git commit -m "state: published bulletin $(date -u +'%Y-%m-%d %H:%M UTC')"
+            # A concurrent run may have pushed first; rebase instead of failing.
+            git pull --rebase --autostash origin ${{ github.ref_name }}
+            git push
+          fi
