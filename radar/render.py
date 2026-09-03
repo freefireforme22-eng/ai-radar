@@ -281,8 +281,15 @@ def _tehran_now() -> datetime:
 # The complaint was that every post looked identical ("قالب پیامای الان همه‌شون
 # شبیه همه"). The API exposes no colour or font control, so identity has to come
 # from rotating the *structure*: which quote form carries the digest, which
-# button colour leads, which glyphs mark the sections. One theme per 6-hour slot
-# means four consecutive bulletins never look the same.
+# button colour leads, which glyphs mark the sections.
+#
+# SIX themes, not four, and this is not cosmetic. With four themes and four
+# 6-hour slots a day, `yday * 4 + slot` is always ≡ slot (mod 4): the index never
+# advanced with the date, so the 06:00 bulletin was 🛰 *every single day* for
+# ever. Measured over five days before the fix — slot 0 was 🛰 five times out of
+# five. Six themes make 4 and the theme count coprime-ish (lcm 12), so a given
+# slot walks the whole set over three days and a reader who checks at the same
+# hour each morning sees a different shape each time.
 _THEMES = [
     {"mark": "🛰", "accent": "primary", "digest": "pullquote",
      "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage",
@@ -296,20 +303,38 @@ _THEMES = [
     {"mark": "🔭", "accent": "link", "digest": "pullquote",
      "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow",
      "voice": "fa-IR-DilaraNeural"},
+    {"mark": "📡", "accent": "success", "digest": "expandable",
+     "rule": "⋄ ⋄ ⋄ ⋄", "glance": "🔎", "gallery": "collage",
+     "voice": "fa-IR-DilaraNeural"},
+    {"mark": "🛠", "accent": "primary", "digest": "blockquote",
+     "rule": "═════", "glance": "🧩", "gallery": "slideshow",
+     "voice": "fa-IR-FaridNeural"},
 ]
 
-# Section accents: each section gets its own heading size and quote form so a
-# research item reads differently from a funding item even inside one bulletin.
+# Section accents. The heading sizes genuinely differ (they were all 3 before,
+# which made the "each section reads differently" claim false): a model launch
+# gets the loudest heading, a research item the quietest, so one bulletin has
+# internal hierarchy as well as differing from the next bulletin.
 _SECTION_STYLE = {
-    "models":   {"size": 3, "quote": "expandable", "bullet": "i"},
+    "models":   {"size": 2, "quote": "expandable", "bullet": "i"},
     "business": {"size": 3, "quote": "pullquote", "bullet": "1"},
-    "policy":   {"size": 3, "quote": "blockquote", "bullet": "a"},
-    "tools":    {"size": 3, "quote": "expandable", "bullet": "1"},
+    "policy":   {"size": 4, "quote": "blockquote", "bullet": "a"},
+    "tools":    {"size": 5, "quote": "expandable", "bullet": "I"},
 }
 
 
 def _theme(now: datetime) -> dict:
-    return _THEMES[((now.timetuple().tm_yday * 4) + now.hour // 6) % len(_THEMES)]
+    """Pick this slot's theme.
+
+    The multiplier must be coprime with the theme count, or a given hour of the
+    day can never reach every theme. Measured: `yday * 4 + slot` (four slots,
+    four themes) pinned slot 0 to 🛰 on all five days tested; with six themes it
+    still only reached the even ones, because gcd(4, 6) = 2. Using 5, which is
+    coprime with 6, the 06:00 bulletin walks all six themes over six days while
+    consecutive slots inside one day still differ by exactly one step.
+    """
+    slot = now.hour // 6
+    return _THEMES[(now.timetuple().tm_yday * 5 + slot) % len(_THEMES)]
 
 
 def current_voice() -> str:

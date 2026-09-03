@@ -976,3 +976,34 @@ def test_hybrid_repair_leaves_real_names_and_persian_alone():
     for safe in ("Hugging Face و OpenAI مدل دادند", "دقت مدل GPT-5 بالاست",
                  "ترنسفورمر و رمزگذار سالم بمانند"):
         assert tr(safe) == safe
+
+
+def test_theme_rotation_reaches_every_theme_at_a_fixed_hour():
+    """The real bug this guards: with four themes and four 6-hour slots,
+    `yday * 4 + slot` is congruent to `slot` mod 4, so the 06:00 bulletin was 🛰
+    every single day forever. The multiplier must stay coprime with the theme
+    count."""
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    marks = {render._theme(base + timedelta(days=d))["mark"] for d in range(30)}
+    assert len(marks) == len(render._THEMES), (
+        f"a reader checking at 06:00 only ever sees {marks}")
+
+
+def test_consecutive_bulletins_never_share_a_theme():
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+    seq = [render._theme(base + timedelta(hours=6 * i))["mark"] for i in range(60)]
+    assert all(a != b for a, b in zip(seq, seq[1:]))
+
+
+def test_sections_have_genuinely_different_heading_sizes():
+    """They were all size 3, which made "each section reads differently" false."""
+    sizes = {k: v["size"] for k, v in render._SECTION_STYLE.items()}
+    assert len(set(sizes.values())) == len(sizes), sizes
+
+
+def test_every_section_bullet_kind_is_a_documented_label_type():
+    documented = {"1", "a", "A", "i", "I"}
+    for key, style in render._SECTION_STYLE.items():
+        assert style["bullet"] in documented, key
