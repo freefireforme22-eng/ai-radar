@@ -271,6 +271,33 @@ def _fix_spelled_version(text: str, version: str) -> tuple[str, bool]:
 
 
 
+# ── orthographic repair ───────────────────────────────────────────────────
+# Models occasionally double a letter in a Persian brand name ("آامازون" for
+# آمازون, seen in a live run). The audit cannot catch it: the text is 100%
+# Persian with no Latin residue, so it scores perfectly. These are the specific
+# misspellings observed, plus a general rule for a doubled alef after آ, which
+# is never valid Persian orthography.
+_SPELLING_FIX = {
+    "آامازون": "آمازون", "آمازونن": "آمازون",
+    "گوگگل": "گوگل", "گووگل": "گوگل",
+    "مایکروسافتت": "مایکروسافت", "مایککروسافت": "مایکروسافت",
+    "هووش": "هوش", "مصنوععی": "مصنوعی", "مصنوعیی": "مصنوعی",
+    "کاربرران": "کاربران", "شرکتت": "شرکت", "مدلل": "مدل",
+}
+_DOUBLED_ALEF = re.compile(r"آا")
+
+
+def _fix_spelling(text: str) -> str:
+    """Repair the orthographic doubles that the Persian audit cannot see."""
+    if not text:
+        return text
+    for bad, good in _SPELLING_FIX.items():
+        if bad in text:
+            text = text.replace(bad, good)
+    # آ is already alef-with-madda; a following bare alef is always a typo.
+    return _DOUBLED_ALEF.sub("آ", text)
+
+
 def _localise_one(story: Story) -> Story | None:
     body = (story.summary_en or "").strip()
     # Vendor blogs (OpenAI, DeepMind) often publish an empty RSS description.
@@ -292,10 +319,10 @@ def _localise_one(story: Story) -> Story | None:
                 continue
             if not isinstance(data, dict):
                 continue
-            title_fa = _repair_translit(str(data.get("title_fa", "")).strip())
-            summary_fa = _repair_translit(str(data.get("summary_fa", "")).strip())
-            why_fa = _repair_translit(str(data.get("why_fa", "")).strip())
-            facts = [_repair_translit(str(f).strip())
+            title_fa = _fix_spelling(_repair_translit(str(data.get("title_fa", "")).strip()))
+            summary_fa = _fix_spelling(_repair_translit(str(data.get("summary_fa", "")).strip()))
+            why_fa = _fix_spelling(_repair_translit(str(data.get("why_fa", "")).strip()))
+            facts = [_fix_spelling(_repair_translit(str(f).strip()))
                      for f in (data.get("facts") or []) if str(f).strip()]
 
             # A version number written in words ("نسخه صفر.سی‌وسه") is a factual

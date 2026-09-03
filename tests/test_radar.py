@@ -264,3 +264,26 @@ def test_translit_covers_every_gemini_spelling():
     from radar.enrich import _repair_translit
     for spelling in ("جمینای", "جمینی", "جیمینی", "جمنی"):
         assert "Gemini" in _repair_translit(f"مدل {spelling} معرفی شد"), spelling
+
+
+# ── orthographic doubles the Persian audit cannot see ────────────────────
+def test_spelling_fix_repairs_observed_typos():
+    from radar.enrich import _fix_spelling
+    assert _fix_spelling("دستیار آامازون") == "دستیار آمازون"
+    assert _fix_spelling("گوگگل اعلام کرد") == "گوگل اعلام کرد"
+
+
+def test_spelling_fix_leaves_correct_text_untouched():
+    from radar.enrich import _fix_spelling
+    for good in ("آمازون", "هوش مصنوعی", "گوگل", "مایکروسافت", "آینده روشن است"):
+        assert _fix_spelling(good) == good, good
+
+
+def test_digest_and_summary_share_the_same_repairs():
+    """Every reader-visible field must go through the same cleanup chain."""
+    import inspect
+    from radar import enrich
+    src = inspect.getsource(enrich._localise_one)
+    for field in ("title_fa", "summary_fa", "why_fa"):
+        line = [l for l in src.splitlines() if l.strip().startswith(f"{field} =")][0]
+        assert "_fix_spelling" in line and "_repair_translit" in line, field
