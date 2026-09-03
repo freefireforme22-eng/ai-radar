@@ -344,6 +344,16 @@ _SECTION_STYLE = {
 _MAX_CITATIONS = 2
 
 
+def theme_index(now: datetime) -> int:
+    """Which theme this slot uses, as an index.
+
+    Exposed because the cover card has to be drawn in the SAME palette as the
+    text bulletin it heads; two independent rotations would drift apart and the
+    post would look assembled from two different designs.
+    """
+    return (now.timetuple().tm_yday * 5 + now.hour // 6) % len(_THEMES)
+
+
 def _theme(now: datetime) -> dict:
     """Pick this slot's theme.
 
@@ -354,8 +364,7 @@ def _theme(now: datetime) -> dict:
     coprime with 6, the 06:00 bulletin walks all six themes over six days while
     consecutive slots inside one day still differ by exactly one step.
     """
-    slot = now.hour // 6
-    return _THEMES[(now.timetuple().tm_yday * 5 + slot) % len(_THEMES)]
+    return _THEMES[theme_index(now)]
 
 
 def current_voice() -> str:
@@ -363,8 +372,25 @@ def current_voice() -> str:
     return _theme(_tehran_now())["voice"]
 
 
+def cover_meta(stories: list[Story]) -> dict:
+    """Everything the cover card needs, computed from the same clock as `build`.
+
+    Kept here rather than in `run` so the card and the bulletin can never
+    disagree about the date, the story count, or the theme.
+    """
+    now = _tehran_now()
+    return {
+        "theme_index": theme_index(now),
+        "date_fa": _jalali(now),
+        "clock": f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS),
+        "count_fa": f"{len(stories)}".translate(_DIGITS),
+        "headlines": [s.title_fa for s in stories[:3]],
+    }
+
+
 # ── the bulletin ─────────────────────────────────────────────────────────
-def build(stories: list[Story], summary_fa: str = "", narration_id: str = "") -> dict:
+def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
+          cover_id: str = "") -> dict:
     now = _tehran_now()
     clock = f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS)
     th = _theme(now)
@@ -376,6 +402,15 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "") ->
               code(f"{len(stories)}".translate(_DIGITS)), " خبر منتخب  •  ",
               {"type": "hashtag", "text": "#رادار_هوش_مصنوعی"}]),
     ]
+
+    # The colour card. It goes AFTER the heading, never before: the channel post
+    # title is taken from the first heading block, and burying the heading under
+    # a photo cost the post its title in an earlier probe. This is the only place
+    # in the whole bulletin with a colour — no rich block type carries one.
+    if cover_id:
+        blocks.append(photo(cover_id, caption={"text": [
+            bold("نمای امروز"), "  ·  ",
+            italic("طرح اختصاصی این بولتن")]}))
 
     # Photos have to sit at the TOP LEVEL to be seen: art buried inside a
     # collapsed toggle is invisible until tapped, which is why the last bulletin

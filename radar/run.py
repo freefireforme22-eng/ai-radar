@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from . import audio, config, enrich, render, sources, telegram
+from . import audio, card, config, enrich, render, sources, telegram
 
 
 def load_seen() -> dict:
@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--plain", action="store_true", help="force the plain-text renderer")
     ap.add_argument("--no-audio", action="store_true",
                     help="skip the Persian narration (faster; text and images only)")
+    ap.add_argument("--no-cover", action="store_true",
+                    help="skip the drawn cover card (faster; no local image render)")
     ap.add_argument("--lookback-fixed", action="store_true",
                     help="never widen the window, even if too few stories are fresh")
     ap.add_argument("--save-payload", metavar="PATH", help="write the rich payload as JSON")
@@ -114,10 +116,27 @@ def main(argv: list[str] | None = None) -> int:
             voice=render.current_voice())
         log("  narration attached" if narration_id else "  narration unavailable — text only")
 
+    # The cover card: the one element of the post that carries a real colour.
+    # Same optional contract as the narration — a failure returns "" and the
+    # bulletin ships without it rather than not shipping.
+    cover_id = ""
+    if not args.plain and not args.no_cover:
+        log("drawing the cover card...")
+        meta = render.cover_meta(ready)
+        path = card.build(**meta)
+        if path:
+            try:
+                cover_id = telegram.upload_photo(
+                    path, args.preview or config.CHANNEL_ID)
+            except Exception as e:                       # noqa: BLE001
+                log(f"  cover upload failed: {e}")
+        log(f"  cover attached (theme {meta['theme_index']})" if cover_id
+            else "  cover unavailable — bulletin ships without it")
+
     if args.plain:
         payload, kind = telegram.plain_fallback(ready, summary), "plain"
     else:
-        payload, kind = render.build(ready, summary, narration_id), "rich"
+        payload, kind = render.build(ready, summary, narration_id, cover_id), "rich"
 
     if args.save_payload:
         with open(args.save_payload, "w", encoding="utf-8") as f:
@@ -148,7 +167,8 @@ def main(argv: list[str] | None = None) -> int:
             for s in ready:
                 s.image = ""
             try:
-                mid = telegram.send_rich(render.build(ready, summary, narration_id), target)
+                mid = telegram.send_rich(
+                    render.build(ready, summary, narration_id, cover_id), target)
                 log(f"posted message_id={mid} (rich, images dropped)")
                 return _save_state(args, ready, seen)
             except telegram.TelegramError as e2:

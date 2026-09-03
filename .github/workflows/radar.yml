@@ -44,6 +44,14 @@ jobs:
       - name: Install narration dependency
         run: pip install --quiet edge-tts==7.2.7
 
+      # The cover card is the only coloured element in the bulletin; rich blocks
+      # expose no colour field at all, so it has to be drawn locally. Pillow on
+      # the runner has no HarfBuzz/Raqm, hence the explicit shaper pair — see
+      # radar/card.py. All three are optional at runtime: a failed import just
+      # ships the bulletin without a cover.
+      - name: Install cover-card dependencies
+        run: pip install --quiet Pillow==12.3.0 arabic-reshaper==3.0.1 python-bidi==0.6.11
+
       - name: Publish bulletin
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}

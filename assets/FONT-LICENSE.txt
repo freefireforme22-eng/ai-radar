@@ -1,0 +1,4 @@
+Vazirmatn — https://github.com/rastikerdar/vazirmatn
+SIL Open Font License 1.1. Bundled (not fetched at build time) so the publish
+step cannot fail on a dead CDN, and because Pillow needs a real font file path.
+Only the two weights the cover uses are included.

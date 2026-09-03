@@ -1397,3 +1397,87 @@ def test_rate_limiting_is_a_feature_not_a_risk():
     assert not facts_mod.has_substance(
         "پشتیبانی از بودجه‌بندی و محدودیت نرخ برای درخواست‌ها")
     assert facts_mod.has_substance("محدودیت اصلی این روش مصرف حافظه است.")
+
+
+# ── the cover card (the only colour in the post) ───────────────────────────
+def test_cover_palette_per_theme_is_distinct():
+    """«اگر هر پیام رنگ و ویژگی خاص خودشو داشته باشه بهتر میشه» — no rich block
+    type carries a colour, so colour arrives as pixels. Two themes sharing a
+    palette would put the channel back to «همه شبیه هم» on the axis the user
+    actually notices first."""
+    from radar import card, render
+    assert len(card.PALETTES) == len(render._THEMES)
+    tops = [p[0] for p in card.PALETTES]
+    assert len(set(tops)) == len(tops), "two themes share a background colour"
+    accents = [p[2] for p in card.PALETTES]
+    assert len(set(accents)) == len(accents), "two themes share an accent"
+
+
+def test_cover_theme_index_matches_the_text_theme():
+    """The card and the bulletin must never disagree about which theme it is —
+    two independent rotations would drift and the post would look assembled from
+    two different designs."""
+    from datetime import datetime, timedelta, timezone
+    from radar import render
+    start = datetime(2026, 1, 1, 0, 5, tzinfo=timezone.utc)
+    for day in range(40):
+        for hour in (0, 6, 12, 18):
+            now = start + timedelta(days=day, hours=hour)
+            assert render._THEMES[render.theme_index(now)] is render._theme(now)
+
+
+def test_cover_sits_after_the_heading_not_before():
+    """The channel post title comes from the FIRST heading block. A cover photo
+    placed above it costs the post its title."""
+    from radar import render
+    s = _story_ready("models")
+    payload = render.build([s], "خلاصه", "", "FAKE_FILE_ID")
+    types = [b["type"] for b in payload["blocks"]]
+    assert types.index("heading") < types.index("photo")
+    assert payload["blocks"][types.index("photo")]["photo"]["media"] == "FAKE_FILE_ID"
+
+
+def test_bulletin_ships_without_a_cover():
+    """Every enrichment is optional by contract: a failed render must not cost
+    the channel its bulletin."""
+    from radar import render
+    s = _story_ready("models")
+    payload = render.build([s], "خلاصه", "", "")
+    media = [b for b in payload["blocks"] if b["type"] == "photo"]
+    assert all(b["photo"]["media"] != "" for b in media)
+
+
+def test_cover_meta_carries_three_headlines_and_persian_digits():
+    from radar import render
+    stories = [_story_ready("models"), _story_ready("business"),
+               _story_ready("policy"), _story_ready("tools")]
+    meta = render.cover_meta(stories)
+    assert set(meta) == {"theme_index", "date_fa", "clock", "count_fa", "headlines"}
+    assert len(meta["headlines"]) == 3, "the card has room for exactly three"
+    assert meta["count_fa"] == "۴", "Latin digits on a Persian card"
+    assert 0 <= meta["theme_index"] < len(render._THEMES)
+
+
+def test_card_build_is_a_noop_when_dependencies_are_missing(monkeypatch):
+    """CI installs Pillow and the shaper; a future runner without them must
+    degrade rather than crash the publish step."""
+    from radar import card
+    monkeypatch.setattr(card, "available", lambda: False)
+    assert card.build(theme_index=0, date_fa="۱", clock="۱۲:۰۰",
+                      count_fa="۳", headlines=["الف"]) == ""
+
+
+def test_persian_on_the_card_is_reshaped_and_reordered():
+    """PIL on the runner has raqm=False/harfbuzz=False: no complex-script
+    shaping. Without pre-shaping, every card would carry disconnected,
+    left-to-right letters that still LOOK like text at thumbnail size."""
+    import pytest
+    pytest.importorskip("arabic_reshaper")
+    pytest.importorskip("bidi")
+    from radar import card
+    raw = "میلیارد"
+    shaped = card._shape(raw)
+    assert shaped != raw, "text went to the renderer unshaped"
+    # presentation forms live in the U+FB50..U+FEFF Arabic Presentation Forms blocks
+    assert any(0xFB50 <= ord(ch) <= 0xFEFF for ch in shaped)
+    assert shaped[0] != raw[0], "visual order was not reversed for RTL"
