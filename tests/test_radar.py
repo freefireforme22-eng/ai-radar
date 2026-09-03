@@ -1592,3 +1592,22 @@ def test_every_story_shape_keeps_every_part_exactly_once():
         if baseline is None:
             baseline = counts
         assert counts == baseline, f"{shape} changed the parts, not just the order"
+
+
+def test_every_live_feed_url_is_not_in_dead_feeds():
+    """Three sweeps in, a rejected URL could easily get re-added by copy-paste.
+    DEAD_FEEDS exists to record the observed reason; it is worthless if a URL can
+    sit in both lists."""
+    from radar import config
+    dead = set(config.DEAD_FEEDS)
+    for feed in config.FEEDS:
+        assert feed["url"] not in dead, f"{feed['name']} is in DEAD_FEEDS: {config.DEAD_FEEDS.get(feed['url'])}"
+
+
+def test_feed_list_has_enough_non_arxiv_families():
+    """Post 131: 5 stories, ONE photo, from a 93-item unseen pool that was 92
+    arXiv. The caps cannot invent variety that the source list does not have, so
+    the picture-carrying families are the real dependency."""
+    from radar import config
+    fams = {f["fa"] for f in config.FEEDS if f["tier"] < 3}
+    assert len(fams) >= 20, sorted(fams)

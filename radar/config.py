@@ -59,6 +59,18 @@ FEEDS: list[dict] = [
     {"name": "IEEE Spectrum",  "url": "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss", "tier": 2, "fa": "آی‌تریپل‌ای اسپکتروم"},  # 2/72h
     {"name": "MIT News",       "url": "https://news.mit.edu/rss/topic/artificial-intelligence2",      "tier": 2, "fa": "ام‌آی‌تی نیوز"},        # 2/72h
 
+    # Third sweep (40 more candidates), added because the pool went one-sided
+    # again: post 131 shipped 5 stories and ONE photo from a 93-item unseen pool
+    # that was 92 arXiv. The problem is not the renderer or the caps — it is that
+    # the non-arXiv feeds are all high-signal and low-volume, so a day with 28
+    # already-published items leaves nothing but abstracts. These four were
+    # validated through radar.sources itself (fetch_feed + is_ai_related), not by
+    # HTTP status: counts are AI items in the last 48h / how many carry art.
+    {"name": "SiliconANGLE",   "url": "https://siliconangle.com/category/ai/feed/",                 "tier": 2, "fa": "سیلیکون‌انگل"},      # 16 AI/48h, 16 with art
+    {"name": "Tom's Hardware", "url": "https://www.tomshardware.com/feeds/all",                     "tier": 2, "fa": "تامز هاردور"},       # 19 AI/48h, 19 with art
+    {"name": "TechRadar AI",   "url": "https://www.techradar.com/feeds/tag/ai",                     "tier": 2, "fa": "تک‌ریدار"},          # 15 AI/48h, 15 with art
+    {"name": "Ars Technica AI","url": "https://arstechnica.com/ai/feed/",                           "tier": 2, "fa": "آرس تکنیکا"},        # 4 AI/48h, 4 with art
+
     {"name": "arXiv cs.AI",   "url": "http://export.arxiv.org/rss/cs.AI",                             "tier": 3, "fa": "آرکایو"},
     {"name": "arXiv cs.LG",   "url": "http://export.arxiv.org/rss/cs.LG",                             "tier": 3, "fa": "آرکایو"},
     {"name": "arXiv cs.CL",   "url": "http://export.arxiv.org/rss/cs.CL",                             "tier": 3, "fa": "آرکایو"},
@@ -104,6 +116,21 @@ DEAD_FEEDS = {
     "https://thegradient.pub/rss/": "0 AI items/72h",
     "https://www.interconnects.ai/feed": "0 AI items/72h",
     "https://lastweekin.ai/feed": "0 AI items/72h",
+    # Third sweep. Note the pattern: vendor blogs behind a JS shell answer 200
+    # with zero items, and news feeds that DO parse can still be useless here.
+    "https://research.google/blog/rss/": "0 AI items/48h (2 posts, neither AI)",
+    "https://www.theguardian.com/technology/artificialintelligenceai/rss": "16 AI/48h but 0 images",
+    "https://feeds.bbci.co.uk/news/technology/rss.xml": "2 AI/48h — too thin",
+    "https://www.theregister.com/software/ai_ml/headlines.atom": "1 AI/48h — too thin",
+    "https://openai.com/news/rss.xml": "648 entries, 0 items parse (sitemap-style)",
+    "https://qwenlm.github.io/blog/index.xml": "no art in any entry",
+    "https://feeds.bloomberg.com/technology/news.rss": "0 art, paywalled bodies",
+    "https://www.ft.com/technology?format=rss": "0 art, paywalled bodies",
+    "https://www.reutersagency.com/feed/?best-topics=tech&post_type=best": "HTTPError",
+    "https://www.engadget.com/tag/ai/rss.xml": "HTTPError",
+    "https://www.databricks.com/blog/feed": "HTTPError",
+    "https://modal.com/blog/feed.xml": "HTTPError",
+    "https://mistral.ai/news/feed.xml": "HTTPError",
 }
 
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
