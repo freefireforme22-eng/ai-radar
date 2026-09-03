@@ -47,6 +47,18 @@ FEEDS: list[dict] = [
     {"name": "Sequoia",       "url": "https://www.sequoiacap.com/feed/",                              "tier": 2, "fa": "سکویا"},
     {"name": "Hacker News",   "url": "https://hnrss.org/frontpage?points=150",                        "tier": 2, "fa": "هکر نیوز"},
 
+    # Added because the pool was 120/143 arXiv, and arXiv carries NO article art:
+    # a balanced-by-section bulletin still came out as nine pictureless abstracts
+    # (post 112). Every feed below was probed live for both yield and images —
+    # 16/16 sampled articles shipped an inline image that passed the Telegram
+    # usability check, all 16 distinct. Yield is AI-related items per 72h.
+    {"name": "AWS ML",         "url": "https://aws.amazon.com/blogs/machine-learning/feed/",          "tier": 1, "fa": "ای‌دبلیواس"},           # 17/72h
+    {"name": "The Decoder",    "url": "https://the-decoder.com/feed/",                                "tier": 2, "fa": "دیکودر"},              # 10/72h
+    {"name": "Semafor Tech",   "url": "https://www.semafor.com/rss.xml",                              "tier": 2, "fa": "سمافور"},              # 10/72h
+    {"name": "AI Business",    "url": "https://aibusiness.com/rss.xml",                               "tier": 2, "fa": "ای‌آی بیزنس"},          # 6/72h
+    {"name": "IEEE Spectrum",  "url": "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss", "tier": 2, "fa": "آی‌تریپل‌ای اسپکتروم"},  # 2/72h
+    {"name": "MIT News",       "url": "https://news.mit.edu/rss/topic/artificial-intelligence2",      "tier": 2, "fa": "ام‌آی‌تی نیوز"},        # 2/72h
+
     {"name": "arXiv cs.AI",   "url": "http://export.arxiv.org/rss/cs.AI",                             "tier": 3, "fa": "آرکایو"},
     {"name": "arXiv cs.LG",   "url": "http://export.arxiv.org/rss/cs.LG",                             "tier": 3, "fa": "آرکایو"},
     {"name": "arXiv cs.CL",   "url": "http://export.arxiv.org/rss/cs.CL",                             "tier": 3, "fa": "آرکایو"},
@@ -56,6 +68,8 @@ FEEDS: list[dict] = [
 DEAD_FEEDS = {
     "https://www.anthropic.com/news/rss.xml": "404",
     "https://www.anthropic.com/rss.xml": "404",
+    "https://www.anthropic.com/engineering/rss.xml": "404",
+    "https://www.anthropic.com/news.xml": "404",
     "https://ai.meta.com/blog/rss/": "400",
     "https://blogs.microsoft.com/ai/feed/": "410 Gone",
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml": "404 (path moved)",
@@ -63,6 +77,33 @@ DEAD_FEEDS = {
     "https://www.zdnet.com/topic/artificial-intelligence/rss.xml": "unreachable",
     "https://stability.ai/news?format=rss": "unreachable",
     "https://ai.googleblog.com/feeds/posts/default": "retired",
+    # Second sweep (40 candidates probed): HTTP 200 but zero parseable items,
+    # i.e. an HTML page or a JS shell, not a feed. Do not re-add on the strength
+    # of a 200.
+    "https://analyticsindiamag.com/feed/": "200 but 0 items",
+    "https://cohere.com/blog/rss.xml": "200 but 0 items",
+    "https://blog.langchain.dev/rss/": "200 but 0 items",
+    "https://hai.stanford.edu/news/rss.xml": "200 but 0 items",
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss25&id=19854910": "200 but 0 items",
+    "https://www.marktechpost.com/feed/": "202 (bot wall)",
+    "https://www.engadget.com/rss.xml": "403",
+    "https://www.perplexity.ai/hub/blog/rss.xml": "403",
+    "https://groq.com/feed/": "404",
+    "https://blog.vllm.ai/feed.xml": "404",
+    "https://runwayml.com/blog/rss.xml": "404",
+    "https://elevenlabs.io/blog/rss.xml": "404",
+    "https://www.qualcomm.com/news/releases.rss": "404",
+    "https://api.axios.com/feed/technology": "404",
+    "https://stability.ai/blog?format=rss": "404",
+    # Live but useless in practice: parseable feed, zero AI items in 72h.
+    "https://www.together.ai/blog/rss.xml": "0 AI items/72h",
+    "https://replicate.com/blog/rss": "0 AI items/72h",
+    "https://ollama.com/blog/rss.xml": "0 AI items/72h",
+    "https://www.nature.com/natmachintell.rss": "0 AI items/72h",
+    "https://syncedreview.com/feed/": "0 AI items/72h",
+    "https://thegradient.pub/rss/": "0 AI items/72h",
+    "https://www.interconnects.ai/feed": "0 AI items/72h",
+    "https://lastweekin.ai/feed": "0 AI items/72h",
 }
 
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -71,6 +112,12 @@ USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 # ── Editorial shape ───────────────────────────────────────────────────────
 MAX_STORIES = 9           # per bulletin; more than this and the toggles get unreadable
 MAX_PER_SECTION = 3
+# One source family (all three arXiv feeds count as one) may not swallow the
+# bulletin either. Post 112 was perfectly balanced by SECTION and still shipped
+# nine research abstracts with zero photos, because arXiv papers land in every
+# section and arXiv carries no article art. Measured: the 24h pool is 143
+# stories, 120 of them arXiv.
+MAX_PER_FAMILY = 3
 # How far the backfill may exceed MAX_PER_SECTION when other sections are empty.
 # Post 110 shipped 6 of 9 stories from `models` (eight arXiv cards) because the
 # backfill ignored the cap outright; a widened window is mostly arXiv.

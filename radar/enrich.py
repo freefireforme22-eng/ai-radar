@@ -116,19 +116,38 @@ def triage(stories: list[Story], keep: int | None = None) -> list[Story]:
 
 
 def _spread(ranked: list[Story], keep: int) -> list[Story]:
-    """Pick `keep` stories without letting one section swallow the bulletin.
+    """Pick `keep` stories without letting one section or one source swallow it.
 
     Extracted from `triage` so the balance rules are testable without an LLM
     call — the unbounded-backfill bug that produced post 110 was invisible to
     every existing test because they all stopped at the primary cap.
+
+    Two caps, because section balance alone was not enough. Measured on the
+    live 24h pool: 143 stories, 120 of them arXiv across three feeds. arXiv
+    papers get classified into every section, so post 112 came out balanced by
+    section and still shipped nine research abstracts and ZERO photos — arXiv
+    has no article art. Grouping by `source_fa` treats the three arXiv feeds as
+    one family, which forces the rest of the bulletin to come from sources that
+    do carry pictures.
     """
     picked: list[Story] = []
     per: dict[str, int] = {}
+    fam: dict[str, int] = {}
+
+    def family(s: Story) -> str:
+        return s.source_fa or s.source
+
+    def take(s: Story) -> None:
+        picked.append(s)
+        per[s.section] = per.get(s.section, 0) + 1
+        fam[family(s)] = fam.get(family(s), 0) + 1
+
     for s in ranked:
         if per.get(s.section, 0) >= config.MAX_PER_SECTION:
             continue
-        picked.append(s)
-        per[s.section] = per.get(s.section, 0) + 1
+        if fam.get(family(s), 0) >= config.MAX_PER_FAMILY:
+            continue
+        take(s)
         if len(picked) >= keep:
             break
 
@@ -136,16 +155,32 @@ def _spread(ranked: list[Story], keep: int) -> list[Story]:
     # cap entirely, which is how channel post 110 shipped 6 `models` items out
     # of 9 and eight near-identical arXiv cards. A widened window is mostly
     # arXiv, so the unbounded backfill turned every thin day into a research
-    # digest. The ceiling is deliberately looser than the primary cap: filling
-    # the bulletin still matters more than perfect balance.
-    ceiling = config.MAX_PER_SECTION + config.BACKFILL_SLACK
+    # digest. The ceilings are deliberately looser than the primary caps:
+    # filling the bulletin still matters more than perfect balance.
+    sec_ceiling = config.MAX_PER_SECTION + config.BACKFILL_SLACK
+    fam_ceiling = config.MAX_PER_FAMILY + config.BACKFILL_SLACK
     for s in ranked:
         if len(picked) >= keep:
             break
-        if s in picked or per.get(s.section, 0) >= ceiling:
+        if s in picked:
             continue
-        picked.append(s)
-        per[s.section] = per.get(s.section, 0) + 1
+        if per.get(s.section, 0) >= sec_ceiling:
+            continue
+        if fam.get(family(s), 0) >= fam_ceiling:
+            continue
+        take(s)
+
+    # Last resort: a one-sided pool should yield a SHORTER bulletin, not a
+    # research digest. Filling all nine slots from the only family left is
+    # exactly what produced posts 110 and 112, so this pass stops at
+    # MIN_STORIES — enough that the post never looks empty, few enough that it
+    # cannot become nine abstracts again.
+    floor = min(keep, config.MIN_STORIES)
+    for s in ranked:
+        if len(picked) >= floor:
+            break
+        if s not in picked:
+            take(s)
     return picked
 
 
@@ -655,6 +690,28 @@ _SPELLING_FIX = {
 }
 _DOUBLED_ALEF = re.compile(r"آا")
 
+# Letters from the Arabic block that are NOT Persian. The translation model
+# reaches for them when it transliterates a brand name — live dry run produced
+# «بڈراک» for Bedrock, with U+0688 (Urdu ḍāl). To a Persian reader that is a
+# foreign letter in the middle of a word, and the Persian-ratio audit is blind
+# to it: the character counts as Arabic-script, so the ratio does not move.
+# Mapped to the nearest Persian letter rather than deleted, so a mistrans-
+# literation degrades to a readable word instead of a hole.
+_FOREIGN_LETTERS = str.maketrans({
+    "ك": "ک", "ي": "ی", "ى": "ی", "ﻯ": "ی",   # Arabic kaf/yeh forms
+    "ة": "ه", "ﺓ": "ه",
+    "أ": "ا", "إ": "ا", "ٱ": "ا", "آ": "آ",
+    "ؤ": "و", "ئ": "ئ",
+    "ڈ": "د", "ٹ": "ت", "ڑ": "ر", "ں": "ن",   # Urdu retroflex/nasal
+    "ھ": "ه", "ے": "ی", "ۓ": "ی",
+    "ٰ": "", "ٓ": "", "ٔ": "",                  # stray Arabic diacritics
+})
+
+
+def _normalise_script(text: str) -> str:
+    """Fold non-Persian Arabic-script letters onto their Persian equivalents."""
+    return text.translate(_FOREIGN_LETTERS) if text else text
+
 
 def _fix_spelling(text: str) -> str:
     """Repair the orthographic doubles that the Persian audit cannot see."""
@@ -663,6 +720,7 @@ def _fix_spelling(text: str) -> str:
     for bad, good in _SPELLING_FIX.items():
         if bad in text:
             text = text.replace(bad, good)
+    text = _normalise_script(text)
     # آ is already alef-with-madda; a following bare alef is always a typo.
     return _DOUBLED_ALEF.sub("آ", text)
 
@@ -897,4 +955,6 @@ def digest(stories: list[Story]) -> str:
     except llm.LLMError:
         return ""
     ok, _ = llm.audit(text, min_persian_ratio=0.6, max_latin_words=6)
-    return _fa_digits(text) if ok else ""
+    # The digest skipped the prose pipeline entirely, so a stray Urdu/Arabic
+    # letter from the model went straight to the top of the bulletin.
+    return _fa_digits(_fix_spelling(text)) if ok else ""

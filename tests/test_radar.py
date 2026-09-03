@@ -1185,3 +1185,78 @@ def test_citation_cards_are_capped_per_bulletin():
     payload = render.build(stories, "جمع‌بندی")
     cards = sum(1 for b in _walk(payload["blocks"]) if b.get("type") == "pre")
     assert cards <= render._MAX_CITATIONS, f"{cards} citation cards rendered"
+
+
+def test_one_source_family_cannot_fill_the_bulletin():
+    """Post 112: balanced across all four sections, nine arXiv abstracts, zero
+    photos. arXiv papers are classified into every section, so a section cap
+    alone does not stop a research-only bulletin -- and arXiv carries no art."""
+    from radar import enrich
+    from datetime import timedelta
+    ranked = []
+    for i in range(20):
+        s = Story(title_en=f"Paper {i}", url=f"https://arxiv.org/abs/26{i:02d}.9",
+                  source=f"arXiv cs.{'AI' if i % 3 == 0 else 'LG'}",
+                  source_fa="آرکایو", tier=3,
+                  published=datetime.now(timezone.utc) - timedelta(hours=1))
+        s.section = ["models", "business", "policy", "tools"][i % 4]
+        s.score = 8
+        ranked.append(s)
+    for i in range(6):
+        s = Story(title_en=f"News {i}", url=f"https://example.com/n{i}",
+                  source="The Verge", source_fa="ورج", tier=1,
+                  published=datetime.now(timezone.utc) - timedelta(hours=1))
+        s.section = ["models", "business", "policy", "tools"][i % 4]
+        s.score = 7
+        ranked.append(s)
+    for i in range(6):
+        s = Story(title_en=f"Wired {i}", url=f"https://example.com/w{i}",
+                  source="Wired", source_fa="وایرد", tier=1,
+                  published=datetime.now(timezone.utc) - timedelta(hours=1))
+        s.section = ["models", "business", "policy", "tools"][i % 4]
+        s.score = 7
+        ranked.append(s)
+
+    picked = enrich._spread(ranked, keep=9)
+    arxiv = sum(1 for s in picked if s.source_fa == "آرکایو")
+    ceiling = config.MAX_PER_FAMILY + config.BACKFILL_SLACK
+    assert arxiv <= ceiling, f"{arxiv} arXiv items of {len(picked)} (ceiling {ceiling})"
+    assert len(picked) == 9, f"the bulletin must still be filled, got {len(picked)}"
+
+
+def test_a_full_bulletin_beats_balance_when_the_pool_is_one_sided():
+    """The caps must not zero out the bulletin: on a night when only arXiv
+    published, ship MIN_STORIES research items rather than three slots and a
+    lot of white space — but NOT nine, which is what posts 110/112 did."""
+    from radar import enrich
+    from datetime import timedelta
+    ranked = []
+    for i in range(20):
+        s = Story(title_en=f"Paper {i}", url=f"https://arxiv.org/abs/27{i:02d}.9",
+                  source="arXiv cs.AI", source_fa="آرکایو", tier=3,
+                  published=datetime.now(timezone.utc) - timedelta(hours=1))
+        s.section = ["models", "business", "policy", "tools"][i % 4]
+        s.score = 8
+        ranked.append(s)
+    picked = enrich._spread(ranked, keep=9)
+    assert len(picked) == config.MIN_STORIES, (
+        f"a one-sided pool should stop at MIN_STORIES, got {len(picked)}")
+
+
+def test_non_persian_arabic_script_letters_are_folded():
+    """The live dry run produced «بڈراک» for Bedrock -- U+0688 is Urdu, not
+    Persian, and the Persian-RATIO audit is blind to it because the character
+    still counts as Arabic script. Folding keeps the word readable."""
+    from radar.enrich import _fix_spelling
+    assert "ڈ" not in _fix_spelling("آمازون بڈراک")
+    assert _fix_spelling("كتاب مصنوعي") == "کتاب مصنوعی"   # Arabic kaf + yeh
+    assert _fix_spelling("مدل هوش مصنوعی") == "مدل هوش مصنوعی"  # untouched
+
+
+def test_the_digest_runs_through_the_spelling_pipeline():
+    """The editor's summary sits at the top of the bulletin and used to bypass
+    `_fix_spelling` entirely, so a stray foreign letter shipped unrepaired."""
+    import inspect
+    from radar import enrich
+    src = inspect.getsource(enrich.digest)
+    assert "_fix_spelling" in src, "digest() must normalise the script too"
