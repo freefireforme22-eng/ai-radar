@@ -1296,10 +1296,18 @@ def test_every_kept_point_gets_a_kind_label():
     render as an unmarked line while its siblings are marked."""
     from radar import facts as facts_mod
     for f in ["مدل جدید ۷۰ میلیارد پارامتر دارد.",
-              "این نسخه نسبت به قبلی سریع‌تر است.",
+              "این نسخه نسبت به قبلی ۲ برابر سریع‌تر است.",
               "محدودیت اصلی مصرف حافظه است.",
               "تا سال ۲۰۲۷ عرضه می‌شود."]:
         assert facts_mod.primary_kind(f), f"kept point has no kind: {f}"
+
+
+def test_a_bare_comparative_without_a_number_is_filler():
+    """«نسبت به قبلی سریع‌تر است» is not a comparison a reader can check, and it
+    passed the first version of the filter on the keyword alone."""
+    from radar import facts as facts_mod
+    assert not facts_mod.has_substance("این نسخه نسبت به قبلی سریع‌تر است.")
+    assert facts_mod.has_substance("این نسخه نسبت به قبلی ۴۰ درصد سریع‌تر است.")
 
 
 def test_kind_marks_cover_every_kind_the_filter_can_return():
@@ -1352,3 +1360,40 @@ def test_vague_growth_verbs_need_a_number():
         "قابلیت‌های عملکردی در حوزه سایبری نسبت به قبل تقویت شده است.")
     assert facts_mod.has_substance(
         "عملکرد نسبت به نسخه قبل ۳۰ درصد تقویت شده است.")
+
+
+def test_keywords_buried_inside_longer_words_do_not_count():
+    """Persian has no case and few delimiters, so `in` matching produces false
+    positives that cannot be spotted by eye. Live post 118 labelled
+    «گزارش‌ها حاکی از دریافت ایمیل‌های متعدد…» as ⚠️ risk because «دریافت»
+    contains «افت» (loss)."""
+    from radar import facts as facts_mod
+    assert not facts_mod.has_substance(
+        "گزارش‌ها حاکی از دریافت ایمیل‌های متعدد توسط محققان است.")
+    # ... while the real word still matches, including with a suffix.
+    assert facts_mod.has_substance("افت شدید فروش تراشه در این فصل ثبت شد.")
+
+
+def test_a_magnitude_word_without_a_number_is_not_a_magnitude():
+    """«کاربران هوش مصنوعی» hit the scale list while quantifying nothing —
+    shipped on live post 118 as 📈."""
+    from radar import facts as facts_mod
+    assert not facts_mod.has_substance(
+        "این کمپین علیه کاربران هوش مصنوعی اجرا شده بود.")
+    assert facts_mod.has_substance("۱۸ میلیون کاربر از این سرویس استفاده می‌کنند.")
+
+
+def test_version_digits_alone_are_not_a_fact():
+    """«تحت لایسنس Apache 2.0 منتشر شده‌اند» is a licence name, not a number the
+    reader learns anything from. It shipped on post 118 marked 📊."""
+    from radar import facts as facts_mod
+    assert not facts_mod.has_substance(
+        "تمام مدل‌ها و کدهای این مجموعه تحت لایسنس Apache 2.0 منتشر شده‌اند.")
+
+
+def test_rate_limiting_is_a_feature_not_a_risk():
+    """«محدودیت نرخ» is rate limiting. Post 118 rendered it with the risk glyph."""
+    from radar import facts as facts_mod
+    assert not facts_mod.has_substance(
+        "پشتیبانی از بودجه‌بندی و محدودیت نرخ برای درخواست‌ها")
+    assert facts_mod.has_substance("محدودیت اصلی این روش مصرف حافظه است.")
