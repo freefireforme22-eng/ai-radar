@@ -121,6 +121,135 @@ def _motif(draw, idx, accent):
             draw.line([(x, 0), (x + H, H)], fill=a, width=1)
 
 
+SW, SH = 1000, 560          # per-story card: taller ratio than the wide cover
+
+
+def _wrap(draw, text: str, font, max_w: int, max_lines: int) -> list[str]:
+    """Greedy word wrap measured on the SHAPED string.
+
+    Wrapping must happen on the raw words but be measured after reshaping, or
+    the widths are wrong for every joined Persian form and lines overflow the
+    card. Returns already-shaped lines, ready to draw.
+    """
+    words = text.split()
+    lines: list[str] = []
+    cur: list[str] = []
+    for word in words:
+        trial = " ".join(cur + [word])
+        if cur and draw.textlength(_shape(trial), font=font) > max_w:
+            lines.append(" ".join(cur))
+            cur = [word]
+            if len(lines) == max_lines:
+                break
+        else:
+            cur.append(word)
+    if cur and len(lines) < max_lines:
+        lines.append(" ".join(cur))
+    if not lines:
+        return []
+    # Mark truncation on the last line when words were left over.
+    used = sum(len(l.split()) for l in lines)
+    if used < len(words):
+        lines[-1] = lines[-1] + " …"
+    return [_shape(l) for l in lines]
+
+
+def build_story(*, rank: int, rank_fa: str, section_fa: str, title_fa: str,
+                source_fa: str, metric: str = "", palette: int = 0,
+                out_path: str = "") -> str:
+    """Draw a card for ONE story and return its path ("" when unavailable).
+
+    Why this exists: auditing the live posts per CARD rather than per post showed
+    the bulletin was still mostly text where it is actually read. Post 141 had
+    four story cards and NONE carried a picture; post 152, six cards and one.
+    The post-level photo count looked healthy only because the cover, the
+    gallery band and the lead image all sit at the top — the cards a reader
+    opens were bare. Feeds are the cause: arXiv and most research sources ship
+    no art at all, so `Story.image` is empty for them and no amount of feed
+    tuning fixes it.
+
+    The palette is chosen by the story's RANK, not by the bulletin theme, so
+    cards inside one post differ from each other in colour — the complaint
+    «قالب پیامای الان همه شون شبیه همه» applies inside a post as much as
+    between posts.
+    """
+    if not available():
+        return ""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        top, bottom, accent, ink = PALETTES[palette % len(PALETTES)]
+        img = Image.new("RGB", (SW, SH), top)
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        for y in range(SH):
+            t = y / (SH - 1)
+            draw.line([(0, y), (SW, y)],
+                      fill=tuple(round(a + (b - a) * t) for a, b in zip(top, bottom)))
+
+        faint = accent + (46,)
+        # A different geometric signature per card, keyed off the rank so two
+        # neighbouring cards never carry the same texture.
+        which = rank % 4
+        if which == 0:
+            for r in range(70, 720, 78):
+                draw.arc([-r, SH // 2 - r, r, SH // 2 + r], 270, 90,
+                         fill=faint, width=3)
+        elif which == 1:
+            for x in range(-SH, 560, 52):
+                draw.line([(x, 0), (x + SH, SH)], fill=faint, width=2)
+        elif which == 2:
+            for i in range(9):
+                s = 40 + i * 52
+                draw.rectangle([30, SH - s - 30, 30 + s, SH - 30],
+                               outline=faint, width=2)
+        else:
+            for gy in range(0, SH, 46):
+                for gx in range(0, 520, 46):
+                    draw.ellipse([gx, gy, gx + 5, gy + 5], fill=faint)
+
+        f_rank = ImageFont.truetype(_BOLD, 190)
+        f_sec = ImageFont.truetype(_REG, 32)
+        f_title = ImageFont.truetype(_BOLD, 56)
+        f_foot = ImageFont.truetype(_REG, 30)
+
+        margin = 64
+
+        def right(text_shaped: str, font, y, fill):
+            w = draw.textlength(text_shaped, font=font)
+            draw.text((SW - margin - w, y), text_shaped, font=font, fill=fill)
+
+        # The rank, oversized and bled off the left edge: an instant visual
+        # anchor that also tells the reader where they are in the bulletin.
+        draw.text((margin - 18, SH - 258), rank_fa, font=f_rank, fill=faint)
+
+        right(_shape(section_fa), f_sec, 52, accent)
+        draw.rectangle([SW - margin - 190, 104, SW - margin, 110], fill=accent)
+
+        y = 148
+        for line in _wrap(draw, title_fa, f_title, SW - 2 * margin - 40, 4):
+            right(line, f_title, y, ink)
+            y += 74
+
+        if metric:
+            badge = _shape(metric)
+            bw = draw.textlength(badge, font=f_sec)
+            bx, by = SW - margin - bw - 26, min(y + 14, SH - 132)
+            draw.rounded_rectangle([bx, by, bx + bw + 26, by + 52], 14,
+                                   fill=accent)
+            draw.text((bx + 13, by + 8), badge, font=f_sec, fill=bottom)
+
+        right(_shape(f"رادار هوش مصنوعی  ·  {source_fa}"), f_foot,
+              SH - margin - 12, accent)
+
+        path = out_path or os.path.join(tempfile.gettempdir(),
+                                        f"radar_story_{rank}.png")
+        img.save(path, "PNG", optimize=True)
+        return path
+    except Exception:
+        return ""
+
+
 def build(*, theme_index: int, date_fa: str, clock: str, count_fa: str,
           headlines: list[str], out_path: str = "") -> str:
     """Draw the cover and return its path (empty string when unavailable)."""

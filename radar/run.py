@@ -178,6 +178,30 @@ def main(argv: list[str] | None = None) -> int:
         log("  chart attached" if motion_id
             else "  chart unavailable — bulletin ships without motion")
 
+    # Drawn story cards: the answer to «هیچ عکسی نیست» measured per CARD rather
+    # than per post. Only stories whose feed ships no art get one, so real
+    # photography is never replaced. Same optional contract — a failure leaves
+    # `Story.card` empty and that card ships text-only as before.
+    if not args.plain and not args.no_cover:
+        specs = render.story_card_specs(ready)
+        drawn = 0
+        for idx, kwargs in specs:
+            path = card.build_story(**kwargs)
+            if not path:
+                continue
+            try:
+                ready[idx].card = telegram.upload_photo(
+                    path, args.preview or config.CHANNEL_ID)
+                drawn += 1
+            except Exception as e:                       # noqa: BLE001
+                log(f"  story card {kwargs['rank']} upload failed: {e}")
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        log(f"  {drawn} story cards drawn for the {len(specs)} art-less stories")
+
     if args.plain:
         payload, kind = telegram.plain_fallback(ready, summary), "plain"
     else:

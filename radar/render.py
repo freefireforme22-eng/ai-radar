@@ -447,6 +447,38 @@ def section_counts(stories: list[Story]) -> list[tuple[str, int]]:
     return [(label, tally[key]) for key, label in config.SECTIONS if tally.get(key)]
 
 
+def story_card_specs(stories: list[Story]) -> list[tuple[int, dict]]:
+    """(index, kwargs) for every story that needs a DRAWN card.
+
+    Only stories with no feed art get one: real photography always wins. The
+    index is the position in `stories`, so the caller can attach the uploaded
+    file_id back to the right story without matching on text.
+
+    Lives here, next to `build`, because the rank shown on the card must be the
+    same rank the bulletin numbers the story with — computed from the same list
+    in the same order.
+    """
+    labels = dict(config.SECTIONS)
+    out: list[tuple[int, dict]] = []
+    for i, s in enumerate(stories):
+        if s.image:
+            continue
+        metric = (f"{s.metric_label}: {s.metric_value}"
+                  if s.metric_label and s.metric_value else "")
+        out.append((i, {
+            "rank": i + 1,
+            "rank_fa": f"{i + 1}".translate(_DIGITS),
+            "section_fa": labels.get(s.section, ""),
+            "title_fa": s.title_fa,
+            "source_fa": s.source_fa,
+            "metric": metric,
+            # Rank-keyed, not theme-keyed: neighbouring cards must differ from
+            # each other INSIDE one bulletin, which is the complaint.
+            "palette": i,
+        }))
+    return out
+
+
 def cover_meta(stories: list[Story]) -> dict:
     """Everything the cover card needs, computed from the same clock as `build`.
 
@@ -677,6 +709,13 @@ def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True,
 
     if s.image and with_image:
         part["photo"] = [photo(s.image, caption={"text": [italic("تصویر: "), s.source_fa]})]
+    elif s.card:
+        # No feed art for this story: use the drawn card instead of shipping a
+        # wall of text. Measured on live posts 141/148/152 — 4 of 4, 8 of 9 and
+        # 5 of 6 story cards respectively had no picture at all, which is the
+        # «هیچ عکسی نیست» complaint at the place the reader actually reads.
+        part["photo"] = [photo(s.card,
+                               caption={"text": [italic("طرح اختصاصی رادار")]})]
 
     # The headline number, given the weight of a heading rather than hidden in a
     # table cell.

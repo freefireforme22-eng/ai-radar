@@ -37,6 +37,11 @@ class Story:
     facts: list[str] = field(default_factory=list)
     also_seen_in: list[str] = field(default_factory=list)
     image: str = ""
+    # A drawn fallback card, uploaded and addressed by Telegram file_id. Only
+    # set for stories whose feed ships no art (arXiv and most research sources
+    # never do), so that no story card is pure text. Kept separate from `image`
+    # because the lead photo and the gallery band must stay REAL photography.
+    card: str = ""
     # Analytical extras. `facts` used to be sentences lifted out of the article,
     # which carried no information the summary did not already have; these
     # fields exist so the model has somewhere to put inference instead.

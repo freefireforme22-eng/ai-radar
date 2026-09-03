@@ -1850,3 +1850,69 @@ def test_half_transliterated_names_are_rejected():
     # legitimate: Persian suffix on a Latin acronym
     assert audit("APIهای جدید و LLMهای بازمتن در این نسخه پشتیبانی می‌شوند و کارایی دارند.")[0]
     assert _half_transliterated("APIها و LLMهای بازمتن") == []
+
+
+def test_drawn_cards_only_replace_missing_photography():
+    """Real feed art must always win; the drawn card is a fallback, never a
+    substitute. Measured need: live posts 141/148/152 had 0/4, 1/9 and 1/6 story
+    cards carrying any picture."""
+    from datetime import datetime, timezone
+    from radar import render
+    from radar.sources import Story
+
+    def mk(title, img):
+        s = Story(title_en="x", url=f"https://x/{title}", source="Wired",
+                  source_fa="\u0648\u0627\u06cc\u0631\u062f", tier=2,
+                  published=datetime.now(timezone.utc), summary_en="y")
+        s.title_fa, s.summary_fa, s.image = title, "\u062e\u0644\u0627\u0635\u0647", img
+        return s
+
+    stories = [mk("\u0627\u0644\u0641", "https://img/a.jpg"), mk("\u0628", ""), mk("\u067e", "")]
+    specs = render.story_card_specs(stories)
+    assert [i for i, _ in specs] == [1, 2], "only the art-less stories get a card"
+    # Palettes are keyed off rank so neighbouring cards differ inside one post.
+    assert specs[0][1]["palette"] != specs[1][1]["palette"]
+    assert specs[0][1]["rank_fa"] == "\u06f2"
+
+
+def test_a_drawn_card_reaches_the_story_toggle():
+    """The card has to end up in the SAME place a photo would, or the reader
+    still sees a wall of text."""
+    import json
+    from datetime import datetime, timezone
+    from radar import render
+    from radar.sources import Story
+    s = Story(title_en="x", url="https://x/1", source="arXiv", source_fa="\u0622\u0631\u06a9\u0627\u06cc\u0648",
+              tier=1, published=datetime.now(timezone.utc), summary_en="y")
+    s.title_fa, s.summary_fa = "\u062a\u06cc\u062a\u0631", "\u062e\u0644\u0627\u0635\u0647"
+    s.card = "DRAWN_FILE_ID"
+    raw = json.dumps(render.build([s], "\u062c\u0645\u0639"))
+    assert "DRAWN_FILE_ID" in raw
+
+
+def test_story_card_text_stays_inside_the_card():
+    """A title long enough to wrap must not run past the margins or over the
+    footer. The vision service is unavailable, so this is measured in pixels."""
+    import os
+    import pytest
+    from radar import card
+    if not card.available():
+        pytest.skip("Pillow or the Persian shaping stack is unavailable")
+    from PIL import Image
+    long_fa = ("\u0637\u0631\u062d \u0627\u06cc\u062c\u0627\u062f \u06a9\u0644\u06cc\u062f \u062a\u0648\u0642\u0641 "
+               "\u0627\u0636\u0637\u0631\u0627\u0631\u06cc \u0647\u0648\u0634 \u0645\u0635\u0646\u0648\u0639\u06cc " * 6)
+    path = card.build_story(rank=3, rank_fa="\u06f3", section_fa="\u0633\u06cc\u0627\u0633\u062a",
+                            title_fa=long_fa, source_fa="\u06af\u0627\u0631\u062f\u06cc\u0646",
+                            metric="\u06f3 \u0628\u0631\u0627\u0628\u0631", palette=2)
+    assert path
+    try:
+        img = Image.open(path).convert("RGB")
+        assert img.size == (card.SW, card.SH)
+        ink = card.PALETTES[2][3]
+        px = img.load()
+        xs = [x for y in range(0, card.SH, 3) for x in range(card.SW)
+              if all(abs(px[x, y][i] - ink[i]) < 40 for i in range(3))]
+        assert xs, "the title drew no ink at all"
+        assert min(xs) >= 40 and max(xs) <= card.SW - 50
+    finally:
+        os.unlink(path)
