@@ -227,3 +227,40 @@ def test_fa_digits_preserves_model_versions():
 def test_fa_digits_converts_bare_numbers():
     from radar.enrich import _fa_digits
     assert _fa_digits("94.2 درصد") == "۹۴.۲ درصد"
+
+
+# ── spelled-out version numbers (live defect: «نسخه صفر.سی‌وسهار» for 0.34) ──
+def test_spelled_version_is_replaced_with_digits_from_source():
+    from radar.enrich import _fix_spelled_version
+    out, ok = _fix_spelled_version("انتشار ابزار llm-gemini نسخه صفر.سی‌وسهار", "0.34")
+    assert ok
+    assert "۰.۳۴" in out
+    # no fragment of the spelled-out number may survive
+    for frag in ("صفر", "سی", "سه", "ار"):
+        assert frag not in out.split("نسخه")[1]
+
+
+def test_spelled_version_without_source_number_is_rejected():
+    from radar.enrich import _fix_spelled_version
+    out, ok = _fix_spelled_version("ابزار نسخه صفر.سی‌وسه منتشر شد", "")
+    assert ok is False, "must refuse to publish rather than invent a version"
+
+
+def test_spelled_version_leaves_ordinary_prose_alone():
+    from radar.enrich import _fix_spelled_version
+    for text in ("این نسخه پایدار است", "نسخه خطی کتاب در موزه است", "نسخه بتا در دسترس است"):
+        out, ok = _fix_spelled_version(text, "2.0")
+        assert ok and out == text, text
+
+
+def test_source_version_extraction():
+    from radar.enrich import _source_version
+    assert _source_version("llm-gemini 0.34 released", "") == "0.34"
+    assert _source_version("Muse Spark v1.3 is here", "") == "1.3"
+    assert _source_version("OpenAI ships a new feature", "") == ""
+
+
+def test_translit_covers_every_gemini_spelling():
+    from radar.enrich import _repair_translit
+    for spelling in ("جمینای", "جمینی", "جیمینی", "جمنی"):
+        assert "Gemini" in _repair_translit(f"مدل {spelling} معرفی شد"), spelling

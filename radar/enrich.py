@@ -147,8 +147,14 @@ def _guess_section(title: str) -> str:
 # آمازون) are deliberately left alone — forcing those to Latin makes the text
 # read worse, and the user asked for Persian, not for Latin sprinkled about.
 TRANSLIT_FIX = {
+    # Gemini has many plausible Persian spellings and the model picks a
+    # different one per call; a live bulletin shipped "جمینی" because only the
+    # "-ای" spellings were listed. Enumerate every variant seen in the wild.
     "جمینای": "Gemini", "جمنای": "Gemini", "جیمینای": "Gemini",
+    "جمینی": "Gemini", "جمنی": "Gemini", "جیمینی": "Gemini",
+    "جمیني": "Gemini", "جِمینای": "Gemini", "جِمینی": "Gemini",
     "اوپن‌ای‌آی": "OpenAI", "اوپن ای آی": "OpenAI", "اپن‌ای‌آی": "OpenAI",
+    "اوپن‌ای": "OpenAI", "اپن ای آی": "OpenAI",
     "چت‌جی‌پی‌تی": "ChatGPT", "چت جی پی تی": "ChatGPT",
     "جی‌پی‌تی": "GPT", "جی پی تی": "GPT",
     "آنتروپیک": "Anthropic", "انتروپیک": "Anthropic",
@@ -159,6 +165,8 @@ TRANSLIT_FIX = {
     "کوپایلوت": "Copilot", "کو‌پایلوت": "Copilot",
     "هاگینگ‌فیس": "Hugging Face", "هاگینگ فیس": "Hugging Face",
     "میدجرنی": "Midjourney", "پرپلکسیتی": "Perplexity",
+    "انویدیا": "Nvidia", "اِنویدیا": "Nvidia",
+    "کلاود کد": "Claude Code", "جِمّا": "Gemma", "جما": "Gemma",
 }
 
 # Persian letters + ZWNJ. Used as a word boundary so a key can never be
@@ -207,6 +215,62 @@ def _repair_translit(text: str) -> str:
     return text
 
 
+# ── spelled-out version numbers ───────────────────────────────────────────
+# A live bulletin shipped «نسخه صفر.سی‌وسهار» for version 0.34: the model wrote
+# the number in *words*. Nothing caught it — the text is 100% Persian letters so
+# the audit passed, and _fa_digits only maps digit→digit. Version numbers must
+# always be digits, so spelled-out ones are rewritten from the English source
+# title, and if that title has no version to copy the story is rejected rather
+# than published with an invented number.
+_NUM_WORDS = [
+    "صفر", "یک", "دو", "سه", "چهار", "پنج", "شش", "شیش", "هفت", "هشت", "نه",
+    "ده", "یازده", "دوازده", "سیزده", "چهارده", "پانزده", "پونزده", "شانزده",
+    "شونزده", "هفده", "هیفده", "هجده", "هیجده", "نوزده", "بیست", "سی", "چهل",
+    "پنجاه", "شصت", "هفتاد", "هشتاد", "نود", "صد", "دویست", "سیصد", "چهارصد",
+    "پانصد", "ششصد", "هفتصد", "هشتصد", "نهصد", "هزار",
+]
+_NUM_WORD_RE = "(?:" + "|".join(sorted(_NUM_WORDS, key=len, reverse=True)) + ")"
+# a chain such as "صفر.سی‌وسه" or "سه و هشت" or "چهار نقطه دو"
+_SPELLED_VERSION_RE = re.compile(
+    r"(?P<label>نسخه|ورژن|version)\s+"
+    r"(?P<num>" + _NUM_WORD_RE + r"(?:[\s\u200c.،/]*(?:و|نقطه|ممیز)?[\s\u200c.]*" + _NUM_WORD_RE + r")*)"
+)
+_VERSION_IN_SOURCE = re.compile(r"\b[vV]?(\d+(?:\.\d+){0,2})\b")
+
+
+def _source_version(title_en: str, body: str = "") -> str:
+    """The first version-looking number in the English source, or ''."""
+    for hay in (title_en, body):
+        m = _VERSION_IN_SOURCE.search(hay or "")
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _fix_spelled_version(text: str, version: str) -> tuple[str, bool]:
+    """Replace spelled-out version words with digits.
+
+    Returns (text, ok). ok=False means a spelled version was found but there is
+    no real number to substitute, so the caller must not publish the text.
+    """
+    if not text or "نسخه" not in text and "ورژن" not in text:
+        return text, True
+    hit = _SPELLED_VERSION_RE.search(text)
+    if not hit:
+        return text, True
+    if not version:
+        return text, False
+    digits = version.translate(_DIGITS)
+    # The model's spelling is often mangled ("سی‌وسهار" for 34), so the regex can
+    # stop mid-word and leave a stray fragment ("نسخه ۰.۳۴ار"). Extend the match
+    # to the end of the glued word — no space means it is part of the number.
+    end = hit.end()
+    while end < len(text) and re.match(r"[\u0600-\u06FF\u200c]", text[end]):
+        end += 1
+    return text[:hit.start()] + f"{hit.group('label')} {digits}" + text[end:], True
+
+
+
 def _localise_one(story: Story) -> Story | None:
     body = (story.summary_en or "").strip()
     # Vendor blogs (OpenAI, DeepMind) often publish an empty RSS description.
@@ -233,6 +297,17 @@ def _localise_one(story: Story) -> Story | None:
             why_fa = _repair_translit(str(data.get("why_fa", "")).strip())
             facts = [_repair_translit(str(f).strip())
                      for f in (data.get("facts") or []) if str(f).strip()]
+
+            # A version number written in words ("نسخه صفر.سی‌وسه") is a factual
+            # defect, not a style one, so it is repaired from the English source
+            # or the attempt is thrown away.
+            src_version = _source_version(story.title_en, body)
+            title_fa, ok_v1 = _fix_spelled_version(title_fa, src_version)
+            summary_fa, ok_v2 = _fix_spelled_version(summary_fa, src_version)
+            if not (ok_v1 and ok_v2):
+                story.facts = []
+                continue
+            facts = [_fix_spelled_version(f, src_version)[0] for f in facts]
 
             # Gate every field the reader will actually see.
             ok_title, why_t = llm.audit(title_fa, min_persian_ratio=0.45, max_latin_words=3)
