@@ -1260,3 +1260,95 @@ def test_the_digest_runs_through_the_spelling_pipeline():
     from radar import enrich
     src = inspect.getsource(enrich.digest)
     assert "_fix_spelling" in src, "digest() must normalise the script too"
+
+
+# ── «نکات کلیدی» substance filter ─────────────────────────────────────────
+def test_vacuous_key_points_are_rejected():
+    """The exact filler that shipped on channel post 114: novel wording, zero
+    summary overlap, and nothing a reader could use."""
+    from radar import facts as facts_mod
+    filler = [
+        "این نسخه عملکرد سایبری گوگل را تقویت می‌کند.",
+        "تمرکز اصلی مدل جدید بر انجام وظایف استدلالی بلندمدت است.",
+        "گروه‌های تروریستی در حال حاضر از هوش مصنوعی استفاده می‌کنند.",
+        "این آموزش شامل مراحل گام‌به‌گام راه‌اندازی سراسری سیستم است.",
+        "یک برنامه سایبری مشابه سایر رقبای هوش مصنوعی معرفی شده است.",
+    ]
+    for f in filler:
+        assert not facts_mod.has_substance(f), f"filler passed the substance test: {f}"
+
+
+def test_substantive_key_points_survive():
+    """Points that actually shipped and were worth reading must not be lost."""
+    from radar import facts as facts_mod
+    real = [
+        "قیمت توکن‌های ورودی و خروجی به ترتیب ۱.۲۵ و ۴.۲۵ دلار به ازای هر میلیون توکن است.",
+        "نسخه max در بنچمارک τ³-Banking با کسب ۵۲ درصد رتبه نخست را به دست آورد.",
+        "بیش از ۱۸ میلیون توسعه‌دهنده از هاب Hugging Face استفاده می‌کنند.",
+        "عربستان قصد دارد تا سال ۲۰۳۴ میلادی شش گیگابایت دیتاسنتر مستقر کند.",
+    ]
+    for f in real:
+        assert facts_mod.has_substance(f), f"real point was dropped: {f}"
+
+
+def test_every_kept_point_gets_a_kind_label():
+    """The label drives the per-point glyph, so a kept point with no kind would
+    render as an unmarked line while its siblings are marked."""
+    from radar import facts as facts_mod
+    for f in ["مدل جدید ۷۰ میلیارد پارامتر دارد.",
+              "این نسخه نسبت به قبلی سریع‌تر است.",
+              "محدودیت اصلی مصرف حافظه است.",
+              "تا سال ۲۰۲۷ عرضه می‌شود."]:
+        assert facts_mod.primary_kind(f), f"kept point has no kind: {f}"
+
+
+def test_kind_marks_cover_every_kind_the_filter_can_return():
+    """A kind with no glyph silently falls back to a generic mark, which is the
+    'every point looks the same' problem in miniature."""
+    from radar import facts as facts_mod
+    kinds = {name for name, _ in facts_mod._KINDS}
+    assert kinds <= set(render._KIND_MARK), (
+        f"kinds without a glyph: {kinds - set(render._KIND_MARK)}")
+
+
+def test_key_points_render_with_distinct_marks():
+    import json as _json
+    s = _story_ready("models")
+    s.facts = ["مدل ۷۰ میلیارد پارامتر دارد.",
+               "محدودیت اصلی مصرف حافظه است.",
+               "تا سال ۲۰۲۷ عرضه می‌شود."]
+    payload = render.build([s], "جمع‌بندی")
+    dumped = _json.dumps(payload, ensure_ascii=False)
+    marks = [m for m in render._KIND_MARK.values() if m in dumped]
+    assert len(marks) >= 2, f"only {len(marks)} distinct kind marks rendered"
+
+
+def test_leaked_category_prefix_is_stripped():
+    """The salvage prompt names the five categories, and the model echoed one:
+    «محدودیت یا ریسک: بسیاری از ارائه‌دهندگان…» shipped in a live dry run."""
+    from radar import facts as facts_mod
+    cases = [
+        ("محدودیت یا ریسک: کاهش هزینه‌ها پروژه‌های میلیارد دلاری را تهدید می‌کند.",
+         "کاهش هزینه‌ها پروژه‌های میلیارد دلاری را تهدید می‌کند."),
+        ("عدد مشخص: قیمت هر میلیون توکن ۴.۲۵ دلار است.",
+         "قیمت هر میلیون توکن ۴.۲۵ دلار است."),
+        ("مقایسه — این مدل ۲ برابر سریع‌تر است.", "این مدل ۲ برابر سریع‌تر است."),
+    ]
+    for raw, want in cases:
+        assert facts_mod.strip_label(raw) == want, facts_mod.strip_label(raw)
+
+
+def test_a_normal_point_is_not_mangled_by_prefix_stripping():
+    from radar import facts as facts_mod
+    f = "بیش از ۱۸ میلیون توسعه‌دهنده از این پلتفرم استفاده می‌کنند."
+    assert facts_mod.strip_label(f) == f
+
+
+def test_vague_growth_verbs_need_a_number():
+    """«قابلیت‌های عملکردی نسبت به قبل تقویت شده است» passed the first version of
+    the filter on the keyword «نسبت به» while saying nothing measurable."""
+    from radar import facts as facts_mod
+    assert not facts_mod.has_substance(
+        "قابلیت‌های عملکردی در حوزه سایبری نسبت به قبل تقویت شده است.")
+    assert facts_mod.has_substance(
+        "عملکرد نسبت به نسخه قبل ۳۰ درصد تقویت شده است.")

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 from . import config, geo, llm
+from . import facts as facts_mod
 from .sources import Story, fetch_article_and_image
 
 SYSTEM = (
@@ -725,6 +726,69 @@ def _fix_spelling(text: str) -> str:
     return _DOUBLED_ALEF.sub("آ", text)
 
 
+FACTS_PROMPT = """از متن این خبر فقط «نکات کلیدی» سختِ قابل‌استناد را بیرون بکش.
+
+عنوان: {title}
+متن: {body}
+
+یک شیء JSON با کلید "facts" برگردان: آرایه‌ای از ۲ تا ۴ رشته فارسی.
+
+هر نکته باید *دقیقاً* یکی از این پنج نوع باشد و آن نوع باید در خودِ جمله دیده شود:
+۱. عدد مشخص و معنایش (قیمت، دقت، تعداد پارامتر، امتیاز بنچمارک، مبلغ سرمایه)
+۲. مقایسه با رقیب یا نسخه قبلی (چه چیزی بهتر/بدتر/سریع‌تر شد و چقدر)
+۳. محدودیت یا ریسکی که خودِ خبر به آن اشاره کرده
+۴. بازه زمانی یا مرحله بعدی (چه زمانی، تا کی، بعد از این چه)
+۵. مقیاس (تعداد کاربر، حجم داده، توان مصرفی، اندازه بازار)
+
+ممنوعِ مطلق — این‌ها را ننویس:
+- جمله‌های کلی: «این یک پیشرفت مهم است»، «عملکرد را تقویت می‌کند»، «تمرکز بر ... است»
+- بازنویسی عنوان یا خلاصه خبر
+- هر چیزی که عدد، مقایسه، ریسک، زمان یا مقیاس در آن نباشد
+
+اگر متن هیچ نکته سختی ندارد، آرایه خالی برگردان. آرایه خالی بهتر از نکته بی‌ارزش است.
+اعداد را با ارقام فارسی بنویس. فقط JSON برگردان."""
+
+
+def _salvage_facts(story: Story, body: str, source: str, clean: callable) -> list[str]:
+    """A second, narrower pass when the first call produced only filler.
+
+    Measured on live post 114: of 18 shipped points, 10 carried no number, no
+    comparison, no risk, no timeframe and no magnitude. The substance filter
+    drops those — which would leave several stories with an empty «نکات کلیدی»
+    section. Rather than show nothing, ask again with a prompt that does one job
+    only. An empty result is still accepted: no section beats a worthless one.
+    """
+    try:
+        data = llm.json_call(
+            FACTS_PROMPT.format(title=story.title_en, body=body[:1800]),
+            config.MODEL_STRONG, system=SYSTEM, temperature=0.15, max_tokens=600)
+    except llm.LLMError:
+        return []
+    if isinstance(data, dict):
+        raw = data.get("facts") or []
+    elif isinstance(data, list):
+        raw = data
+    else:
+        return []
+
+    out: list[str] = []
+    for item in raw[:4]:
+        f = clean(facts_mod.strip_label(str(item).strip()))
+        if len(f) < 13:
+            continue
+        ok, _ = llm.audit(f, min_persian_ratio=0.45, max_latin_words=3)
+        if not ok:
+            continue
+        if not facts_mod.has_substance(f):
+            continue
+        if _too_similar(f, story.summary_fa):
+            continue
+        if any(_too_similar(f, prev) for prev in out):
+            continue
+        out.append(_fa_digits(f))
+    return out
+
+
 def _localise_one(story: Story) -> Story | None:
     body = (story.summary_en or "").strip()
     # Vendor blogs (OpenAI, DeepMind) often publish an empty RSS description.
@@ -761,7 +825,8 @@ def _localise_one(story: Story) -> Story | None:
             title_fa = _clean(data.get("title_fa", ""))
             summary_fa = _clean(data.get("summary_fa", ""))
             why_fa = _clean(data.get("why_fa", ""))
-            facts = [_clean(f) for f in (data.get("facts") or []) if str(f).strip()]
+            facts = [_clean(facts_mod.strip_label(f))
+                     for f in (data.get("facts") or []) if str(f).strip()]
 
             # A version number written in words ("نسخه صفر.سی‌وسه") is a factual
             # defect, not a style one, so it is repaired from the English source
@@ -782,7 +847,7 @@ def _localise_one(story: Story) -> Story | None:
                 continue
 
             clean_facts = []
-            for f in facts[:4]:
+            for f in facts[:5]:
                 ok_f, _ = llm.audit(f, min_persian_ratio=0.45, max_latin_words=3)
                 if not (ok_f and len(f) > 12):
                     continue
@@ -794,11 +859,22 @@ def _localise_one(story: Story) -> Story | None:
                     continue
                 if any(_too_similar(f, prev) for prev in clean_facts):
                     continue
+                # Novel wording is not the same as substance. Live post 114
+                # shipped 18 points with ZERO summary overlap, 10 of which said
+                # nothing ("این نسخه عملکرد سایبری گوگل را تقویت می‌کند"). A
+                # point must now carry a number, a comparison, a stated risk, a
+                # timeframe, or a magnitude.
+                if not facts_mod.has_substance(f):
+                    continue
                 clean_facts.append(_fa_digits(f))
             story.title_fa = _fa_digits(title_fa)
             story.summary_fa = _fa_digits(summary_fa)
             story.why_fa = _fa_digits(why_fa) if llm.audit(why_fa, min_persian_ratio=0.5)[0] else ""
             story.facts = clean_facts
+            # Everything the model offered was filler. Ask once more with a
+            # prompt that asks ONLY for hard points, using the stronger model.
+            if len(clean_facts) < 2:
+                story.facts = _salvage_facts(story, body, source, _clean) or clean_facts
 
             impact = _clean(data.get("impact_fa", ""))
             if impact and not _too_similar(impact, story.why_fa) \

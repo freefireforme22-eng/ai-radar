@@ -36,6 +36,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from . import config
+from . import facts as facts_mod
 from .sources import Story
 
 # ── RichText helpers ─────────────────────────────────────────────────────
@@ -245,6 +246,17 @@ def table(rows, *, header=True, caption=None, striped=True, compact=True):
 _FA_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
               "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
 _DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+# Marks for the kind of each key point. The API has no colour control, so a
+# leading glyph is the only way to make five points read as five DIFFERENT
+# kinds of fact rather than one wall of sentences.
+_KIND_MARK = {
+    "عدد": "📊",
+    "مقایسه": "⚖️",
+    "ریسک": "⚠️",
+    "مقیاس": "📈",
+    "زمان": "🗓",
+}
 
 
 def _jalali(dt: datetime) -> str:
@@ -548,9 +560,17 @@ def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True) -> 
                           caption={"text": [bold("📍 "), s.map_label]}))
 
     if s.facts:
+        # Tag each point with WHAT it is (عدد / مقایسه / ریسک / مقیاس / زمان)
+        # instead of shipping five interchangeable sentences. The kind comes
+        # from the same test that decides whether a point is worth keeping, so
+        # the label can never disagree with the filter.
+        labelled = []
+        for f in s.facts:
+            kind = facts_mod.primary_kind(f)
+            labelled.append([bold(f"{_KIND_MARK.get(kind, '▸')} "), f] if kind else f)
         out.append(details([bold("🔍 نکات کلیدی"), "  ",
                             italic(f"({len(s.facts)} نکته)".translate(_DIGITS))],
-                           [numbered(s.facts, kind=style["bullet"])], is_open=True))
+                           [numbered(labelled, kind=style["bullet"])], is_open=True))
 
     out.append(table([["منبع", "اهمیت", "زمان انتشار"],
                       [s.source, f"{s.score:.0f}".translate(_DIGITS) + "/۱۰",
