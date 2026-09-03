@@ -931,12 +931,21 @@ def _fa_digits(text: str) -> str:
     """Persian digits, but leave version/product tokens in ASCII."""
     protected: list[tuple[int, int]] = []
     for m in _VERSION_RUN.finditer(text):
+        start = m.start()
+        # Extend BACKWARDS over a digit prefix: resolutions and units put the
+        # number first ("2K", "4K", "5G", "3D", "4x"). Live post 134 shipped
+        # «۲K و ۴K» — the regex starts at a letter, so the leading digit was
+        # converted on its own and left a mixed-script token inside one word,
+        # the same class of defect as «خودregressive» but in the other order.
+        head = re.search(r"\d+$", text[:start])
+        if head:
+            start = head.start()
         # extend over a trailing " 5.2" style version suffix
         end = m.end()
         tail = re.match(r"[-\s]?\d+(?:\.\d+)*", text[end:])
         if tail:
             end += tail.end()
-        protected.append((m.start(), end))
+        protected.append((start, end))
 
     out = []
     for i, ch in enumerate(text):

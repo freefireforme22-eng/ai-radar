@@ -1611,3 +1611,22 @@ def test_feed_list_has_enough_non_arxiv_families():
     from radar import config
     fams = {f["fa"] for f in config.FEEDS if f["tier"] < 3}
     assert len(fams) >= 20, sorted(fams)
+
+
+def test_digit_prefixed_units_stay_ascii():
+    """Live post 134 shipped «۲K و ۴K»: _VERSION_RUN starts at a LETTER, so the
+    leading digit of a resolution was converted on its own and left a
+    mixed-script token inside one word — «خودregressive» in the other order.
+    Numbers that are plain quantities must still convert."""
+    from radar.enrich import _fa_digits
+    assert "2K" in _fa_digits("وضوح تصویر: 2K و 4K")
+    assert "4K" in _fa_digits("وضوح تصویر: 2K و 4K")
+    assert "5G" in _fa_digits("شبکه 5G")
+    assert "3D" in _fa_digits("نمایش 3D")
+    assert "4x" in _fa_digits("پردازنده 4x سریع‌تر")
+    # ... while real quantities are still localised
+    assert "۱۲" in _fa_digits("قیمت 12 میلیارد دلار")
+    assert "۱۵۰۰" in _fa_digits("سرعت 1500 توکن بر ثانیه")
+    assert "۹۴.۲" in _fa_digits("دقت 94.2 درصد")
+    # and version suffixes keep working
+    assert "GPT-5.2" in _fa_digits("مدل GPT-5.2 منتشر شد")
