@@ -134,6 +134,38 @@ def _garbled(text: str) -> list[str]:
     return out
 
 
+# A Latin letter glued directly to a Persian LETTER inside one word. This is the
+# half-transliterated proper name: live post 148 shipped «Clement-جونز» for
+# Clement-Jones — half kept, half spelled out in Persian. It defeats every other
+# gate for the same reason «خودregressive» did: one short fragment moves neither
+# the Persian ratio nor the Latin-residue count.
+#
+# Persian punctuation (، ؛ ؟) sits in the Arabic Unicode block, so matching on
+# the whole block would flag «OpenAI،» — a Latin word followed by a Persian
+# comma, which is correct and appears in 11 of 15 live posts. The class is
+# therefore restricted to LETTER ranges, and the Persian plural/possessive
+# suffixes that legitimately attach to Latin acronyms (APIها، LLMهای) are
+# whitelisted: measured across every live post on disk, those two rules leave
+# exactly one hit, and it is the defect.
+_FA_LETTER = r"\u0621-\u063A\u0641-\u064A\u0670-\u06D3"
+_HALF_TRANSLIT = re.compile(
+    rf"[A-Za-z][\u200c-]?[{_FA_LETTER}]|[{_FA_LETTER}][\u200c-]?[A-Za-z]")
+_LATIN_WITH_FA_SUFFIX = re.compile(
+    rf"^[A-Za-z][A-Za-z0-9.\-]*\u200c?(?:های|ها|ی|اش|شان)$")
+
+
+def _half_transliterated(text: str) -> list[str]:
+    """Words that mix Latin and Persian letters — a name translated halfway."""
+    out: list[str] = []
+    for token in text.split():
+        core = token.strip("،؛؟.,:()[]«»\"'!؟")
+        if not core or _LATIN_WITH_FA_SUFFIX.match(core):
+            continue
+        if _HALF_TRANSLIT.search(core):
+            out.append(core)
+    return out
+
+
 def audit(text: str, *, min_persian_ratio: float = 0.55,
           max_latin_words: int = 6) -> tuple[bool, str]:
     """Return (ok, reason). Rejects text that is not really Persian.
@@ -156,6 +188,10 @@ def audit(text: str, *, min_persian_ratio: float = 0.55,
     garbled = _garbled(text)
     if garbled:
         return False, f"garbled Persian: {garbled[:5]}"
+
+    half = _half_transliterated(text)
+    if half:
+        return False, f"half-transliterated: {half[:5]}"
 
     allowed = {w.lower() for w in config.KEEP_LATIN}
     residue: list[str] = []

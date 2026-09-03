@@ -1827,3 +1827,26 @@ def test_voice_note_keeps_its_caption():
     assert block["type"] == "voice_note"
     assert block["voice_note"]["media"] == "FILEID"
     assert block["caption"]["text"] == "روایت صوتی"
+
+
+def test_half_transliterated_names_are_rejected():
+    """Live post 148 shipped «Clement-جونز» for Clement-Jones — a proper name
+    translated halfway. It defeats the ratio gate (one short fragment) and the
+    Latin-residue gate (the Latin half is a legal proper noun), the same way
+    «خودregressive» did in the other direction.
+
+    The two false-positive classes measured across 1,346 live strings must keep
+    passing: a Latin word followed by a Persian comma («OpenAI،»), which appears
+    in 11 of 15 live posts, and Persian plural/possessive suffixes attached to
+    Latin acronyms («APIها», «LLMهای»)."""
+    from radar.llm import audit, _half_transliterated
+
+    ok, reason = audit("Lord Tim Clement-جونز اصلاحیه‌ای بر لایحه امنیت سایبری پیشنهاد کرد.")
+    assert not ok and "half-transliterated" in reason, reason
+    assert audit("Lord Tim Clement-Jones اصلاحیه‌ای بر لایحه امنیت سایبری پیشنهاد کرد.")[0]
+
+    # legitimate: Persian punctuation after a Latin name
+    assert audit("شرکت OpenAI، گوگل و Anthropic هر سه سرمایه‌گذاری کرده‌اند و رقابت شدید است.")[0]
+    # legitimate: Persian suffix on a Latin acronym
+    assert audit("APIهای جدید و LLMهای بازمتن در این نسخه پشتیبانی می‌شوند و کارایی دارند.")[0]
+    assert _half_transliterated("APIها و LLMهای بازمتن") == []
