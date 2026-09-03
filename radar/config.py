@@ -159,6 +159,12 @@ WIDEN_LADDER = (24, 72, 168)   # hours, tried in order when the window is thin
 STATE_PATH = os.environ.get("RADAR_STATE", "data/seen.json")
 STATE_KEEP = 4000         # remembered fingerprints
 
+# Which theme the NEXT bulletin uses. A separate file from the fingerprints
+# because it is a counter, not a set: `save_seen` prunes by value, so a counter
+# living in seen.json would eventually be pruned away as if it were a stale
+# fingerprint.
+ROTATION_PATH = os.environ.get("RADAR_ROTATION", "data/rotation.json")
+
 SECTIONS = [
     ("models",   "🔬 مدل‌ها و پژوهش"),
     ("business", "💰 کسب‌وکار و سرمایه"),

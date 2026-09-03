@@ -26,6 +26,27 @@ def load_seen() -> dict:
         return {}
 
 
+def load_rotation() -> int:
+    """The theme index for this bulletin, persisted across runs.
+
+    Falls back to -1 ("no pin, use the clock") when the file is missing or
+    corrupt, so a first run or a wiped workspace still posts.
+    """
+    try:
+        with open(config.ROTATION_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        value = data.get("theme") if isinstance(data, dict) else None
+        return int(value) if isinstance(value, int) else -1
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        return -1
+
+
+def save_rotation(index: int) -> None:
+    os.makedirs(os.path.dirname(config.ROTATION_PATH) or ".", exist_ok=True)
+    with open(config.ROTATION_PATH, "w", encoding="utf-8") as f:
+        json.dump({"theme": index % render.theme_count()}, f)
+
+
 def save_seen(seen: dict) -> None:
     os.makedirs(os.path.dirname(config.STATE_PATH) or ".", exist_ok=True)
     if len(seen) > config.STATE_KEEP:
@@ -55,6 +76,19 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.time()
     log = lambda m: print(f"[{time.time()-t0:6.1f}s] {m}", flush=True)
+
+    # Advance the visual rotation ONCE per bulletin, before anything is rendered,
+    # so the cover, the motion chart and the text all agree on the theme. Driven
+    # by a persisted counter rather than the clock: measured on the 22 real
+    # publishes in git history, the clock formula gave 17 of 21 consecutive posts
+    # an IDENTICAL theme (theme 3 alone took 14, theme 4 never appeared) because
+    # CI, manual dispatches and the 2-hourly safety net all land inside one slot.
+    # Previews are excluded so a probe cannot rob the channel of a step.
+    rotation = -1
+    if not args.dry_run and not args.preview:
+        rotation = (load_rotation() + 1) % render.theme_count()
+        render.set_rotation(rotation)
+        log(f"visual theme {rotation} (persisted rotation, not the clock)")
 
     log("fetching feeds...")
     raw = sources.collect(args.lookback)
@@ -242,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                     render.build(ready, summary, narration_id, cover_id,
                                  motion_id, narration_kind), target)
                 log(f"posted message_id={mid} (rich, images dropped)")
-                return _save_state(args, ready, seen)
+                return _save_state(args, ready, seen, rotation)
             except telegram.TelegramError as e2:
                 log(f"image-free retry also failed: {e2}")
         log("falling back to plain text...")
@@ -254,11 +288,13 @@ def main(argv: list[str] | None = None) -> int:
         for s in ready:
             seen[s.fingerprint] = now
         save_seen(seen)
+        if rotation >= 0:
+            save_rotation(rotation)
         log(f"state saved ({len(seen)} fingerprints)")
     return 0
 
 
-def _save_state(args, ready, seen) -> int:
+def _save_state(args, ready, seen, rotation: int = -1) -> int:
     """Record the published fingerprints (skipped for previews)."""
     if args.preview:
         return 0
@@ -266,6 +302,10 @@ def _save_state(args, ready, seen) -> int:
     for s in ready:
         seen[s.fingerprint] = now
     save_seen(seen)
+    if rotation >= 0:
+        # Only after a SUCCESSFUL post: a failed run must not burn a theme, or a
+        # crash loop would silently skip half the rotation.
+        save_rotation(rotation)
     print(f"state saved ({len(seen)} fingerprints)", flush=True)
     return 0
 

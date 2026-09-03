@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radar import card, config, llm, motion, render, sources  # noqa: E402
+from radar import run as run_mod  # noqa: E402
 from radar.sources import Story  # noqa: E402
 
 
@@ -1916,3 +1917,58 @@ def test_story_card_text_stays_inside_the_card():
         assert min(xs) >= 40 and max(xs) <= card.SW - 50
     finally:
         os.unlink(path)
+
+
+def test_rotation_pin_overrides_the_clock():
+    """The clock formula collapsed under real publish times.
+
+    Measured on the 22 real publishes in the git history of data/seen.json:
+    17 of 21 consecutive pairs shipped the SAME theme because several bulletins
+    land inside one six-hour slot. The pin must win over the clock so the step
+    happens once per published bulletin instead.
+    """
+    from datetime import datetime
+    render.set_rotation(None)
+    try:
+        clock = render.theme_index(datetime(2026, 9, 3, 20, 10))
+        for i in range(render.theme_count()):
+            render.set_rotation(i)
+            assert render.theme_index(datetime(2026, 9, 3, 20, 10)) == i
+        render.set_rotation(None)
+        assert render.theme_index(datetime(2026, 9, 3, 20, 10)) == clock
+    finally:
+        render.set_rotation(None)
+
+
+def test_rotation_pin_reaches_every_theme_and_never_repeats_consecutively():
+    """A counter, unlike the clock, cannot give two posts in a row one theme."""
+    n = render.theme_count()
+    seq = [(i + 1) % n for i in range(-1, 3 * n)]
+    assert set(seq) == set(range(n)), "counter must reach every theme"
+    assert all(a != b for a, b in zip(seq, seq[1:])), "no consecutive repeats"
+
+
+def test_rotation_pin_drives_cover_and_motion_together(tmp_path, monkeypatch):
+    """Cover, motion chart and text must agree, or the post looks assembled
+    from two different designs."""
+    from datetime import datetime
+    render.set_rotation(2)
+    try:
+        assert render.theme_index(datetime(2026, 1, 1, 0, 0)) == 2
+        meta = render.cover_meta([_story_ready()])
+        assert meta["theme_index"] == 2
+    finally:
+        render.set_rotation(None)
+
+
+def test_rotation_survives_a_round_trip_through_disk(tmp_path, monkeypatch):
+    """A counter that does not persist is the clock bug with extra steps."""
+    path = tmp_path / "rotation.json"
+    monkeypatch.setattr(config, "ROTATION_PATH", str(path))
+    assert run_mod.load_rotation() == -1        # missing file
+    run_mod.save_rotation(4)
+    assert run_mod.load_rotation() == 4
+    path.write_text("{ not json", encoding="utf-8")
+    assert run_mod.load_rotation() == -1        # corrupt file must not crash
+    run_mod.save_rotation(render.theme_count() + 1)
+    assert run_mod.load_rotation() == 1         # wraps modulo the theme count

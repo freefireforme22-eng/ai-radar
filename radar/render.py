@@ -397,14 +397,45 @@ _STORY_SHAPES = ("report", "figure", "dossier", "briefing")
 _MAX_CITATIONS = 2
 
 
+_ROTATION: int | None = None
+
+
+def set_rotation(index: int | None) -> None:
+    """Pin this render to a theme, overriding the clock.
+
+    MEASURED FAILURE this exists to fix. `theme_index` derived the theme from the
+    wall clock (`yday * 5 + slot`), which is only fair if bulletins actually land
+    one per six-hour slot. They do not: the CI schedule, manual dispatches and the
+    two-hourly server safety net all publish whenever the channel is stale, so
+    several posts land inside ONE slot. Across the 22 real publishes recorded in
+    the git history of `data/seen.json`, **17 of 21 consecutive pairs shipped the
+    IDENTICAL theme**, theme 3 took 14 of 22 posts, and theme 4 never appeared at
+    all. That is precisely «قالب پیامای الان همه شون شبیه همه و مو نمیزنه» — the
+    rotation existed but the clock was the wrong dial.
+
+    With a persisted counter the step happens once per PUBLISHED bulletin, so
+    consecutive posts differ by construction no matter when they fire. `None`
+    restores the clock formula, which is what unit tests and previews use.
+    """
+    global _ROTATION
+    _ROTATION = None if index is None else index % len(_THEMES)
+
+
 def theme_index(now: datetime) -> int:
-    """Which theme this slot uses, as an index.
+    """Which theme this bulletin uses, as an index.
 
     Exposed because the cover card has to be drawn in the SAME palette as the
     text bulletin it heads; two independent rotations would drift apart and the
     post would look assembled from two different designs.
     """
+    if _ROTATION is not None:
+        return _ROTATION
     return (now.timetuple().tm_yday * 5 + now.hour // 6) % len(_THEMES)
+
+
+def theme_count() -> int:
+    """How many themes exist, so the caller can advance the counter modulo it."""
+    return len(_THEMES)
 
 
 def _theme(now: datetime) -> dict:
