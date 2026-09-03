@@ -340,6 +340,21 @@ _SECTION_STYLE = {
     "tools":    {"size": 5, "quote": "expandable", "bullet": "I"},
 }
 
+# Per-story card shapes. Rotating the BULLETIN layout fixed post-to-post
+# monotony, but inside one bulletin every story was still assembled in exactly
+# the same order — measured on live post 128, the seven story toggles came out
+# `.pHQPDDTBp`, `.pHQPpMDDTBp`, `.pHQPDTBp`, `.pQPDTBp`, `.pHPPDTBp`,
+# `.pHPPTBp`, `.pHqPDTBp`: the differences are only which optional extras
+# existed, never the arrangement. Scrolling one post therefore looks like the
+# same card seven times, which is the complaint at reading scale.
+#
+# Four shapes, chosen so each answers a different question first:
+#   report   — summary → picture → number → why      (classic news lede)
+#   figure   — picture → number → summary → why      (the image IS the story)
+#   dossier  — number → key points → summary → why   (data first)
+#   briefing — why → summary → key points → picture  (analysis first)
+_STORY_SHAPES = ("report", "figure", "dossier", "briefing")
+
 # A per-story extra that appears on EVERY story is wallpaper, not variety.
 _MAX_CITATIONS = 2
 
@@ -507,10 +522,14 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
         inner: list[dict] = []
         for s in group:
             i = rank[id(s)]
+            # Walk the shapes by the story's rank in the bulletin, offset by the
+            # theme, so neighbouring cards never share an arrangement and the same
+            # story position doesn't always get the same shape either.
+            shape = _STORY_SHAPES[(i - 1 + theme_index(now)) % len(_STORY_SHAPES)]
             inner.append(details(
                 [code(f"{i}".translate(_DIGITS)), " ", bold(s.title_fa)],
                 _story_blocks(s, i, style, with_image=s is not lead
-                              and s.image not in gallery),
+                              and s.image not in gallery, shape=shape),
             ))
         count = f"{len(group)}".translate(_DIGITS)
         blocks.append(details([bold(label), "  ", italic(f"({count} خبر)")],
@@ -561,38 +580,49 @@ def _source_counts(stories: list[Story]) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True) -> list[dict]:
-    out: list[dict] = [anchor(f"s{rank}"), para(s.summary_fa)]
+def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True,
+                  shape: str = "report") -> list[dict]:
+    """Assemble one story card.
+
+    The parts are built first and *arranged* second, so a story can lead with its
+    picture, its number, or its analysis. Every part appears at most once
+    regardless of shape; parts with no content simply do not exist.
+    """
+    part: dict[str, list[dict]] = {}
+
+    part["summary"] = [para(s.summary_fa)]
 
     if s.image and with_image:
-        out.append(photo(s.image, caption={"text": [italic("تصویر: "), s.source_fa]}))
+        part["photo"] = [photo(s.image, caption={"text": [italic("تصویر: "), s.source_fa]})]
 
     # The headline number, given the weight of a heading rather than hidden in a
     # table cell.
     if s.metric_label and s.metric_value:
-        out.append(heading([s.metric_label, ": ", marked(f" {s.metric_value} ")], size=4))
+        part["metric"] = [heading([s.metric_label, ": ", marked(f" {s.metric_value} ")], size=4)]
 
+    why: list[dict] = []
     if s.why_fa:
-        out.append(_digest_block(style["quote"], s.why_fa, credit="چرا مهم است"))
+        why.append(_digest_block(style["quote"], s.why_fa, credit="چرا مهم است"))
     if s.impact_fa:
-        out.append(pullquote(s.impact_fa, credit="اگر درست باشد"))
+        why.append(pullquote(s.impact_fa, credit="اگر درست باشد"))
+    if why:
+        part["why"] = why
 
     if s.latex:
-        out.append(para(italic("رابطه کلیدی:")))
-        out.append(math(s.latex))
+        part["math"] = [para(italic("رابطه کلیدی:")), math(s.latex)]
 
     # Research items get a monospace citation card — the one place a `pre` block
     # genuinely belongs in a news bulletin, and something no other story carries.
     if s.citation:
-        out.append(details([bold("📑 ارجاع علمی"), "  ",
-                            italic("برای نقل در مقاله")],
-                           [pre(s.citation, language="bibtex")]))
+        part["citation"] = [details([bold("📑 ارجاع علمی"), "  ",
+                                     italic("برای نقل در مقاله")],
+                                    [pre(s.citation, language="bibtex")])]
 
     # At most one story per bulletin carries a map (enforced in `build`), so the
     # bulletin gets a visual element that is unique inside it.
     if s.map_lat and s.map_lon:
-        out.append(geomap(s.map_lat, s.map_lon,
-                          caption={"text": [bold("📍 "), s.map_label]}))
+        part["map"] = [geomap(s.map_lat, s.map_lon,
+                              caption={"text": [bold("📍 "), s.map_label]})]
 
     if s.facts:
         # Tag each point with WHAT it is (عدد / مقایسه / ریسک / مقیاس / زمان)
@@ -603,24 +633,41 @@ def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True) -> 
         for f in s.facts:
             kind = facts_mod.primary_kind(f)
             labelled.append([bold(f"{_KIND_MARK.get(kind, '▸')} "), f] if kind else f)
-        out.append(details([bold("🔍 نکات کلیدی"), "  ",
-                            italic(f"({len(s.facts)} نکته)".translate(_DIGITS))],
-                           [numbered(labelled, kind=style["bullet"])], is_open=True))
+        part["facts"] = [details([bold("🔍 نکات کلیدی"), "  ",
+                                  italic(f"({len(s.facts)} نکته)".translate(_DIGITS))],
+                                 [numbered(labelled, kind=style["bullet"])], is_open=True)]
 
-    out.append(table([["منبع", "اهمیت", "زمان انتشار"],
-                      [s.source, f"{s.score:.0f}".translate(_DIGITS) + "/۱۰",
-                       _tehran_time_of(s.published)]],
-                     caption=italic("مشخصات خبر"), striped=False))
+    part["meta"] = [table([["منبع", "اهمیت", "زمان انتشار"],
+                           [s.source, f"{s.score:.0f}".translate(_DIGITS) + "/۱۰",
+                            _tehran_time_of(s.published)]],
+                          caption=italic("مشخصات خبر"), striped=False)]
 
     if s.also_seen_in:
-        out.append(para([italic("پوشش خبری دیگر: "), ", ".join(s.also_seen_in)]))
+        part["echo"] = [para([italic("پوشش خبری دیگر: "), ", ".join(s.also_seen_in)])]
+
     # Buttons MUST carry a URL: probed live, a button with an empty url, with
     # `anchor_name`, or with no url at all is rejected with "Text buttons are not
     # allowed in the inline keyboard". Navigation therefore uses an anchor_link
     # entity in a paragraph, not a button.
-    out.append(buttons([("خواندن متن کامل ↗", s.url, "primary"),
-                        ("کانال رادار", "https://t.me/ai_newsBY", "link")]))
-    out.append(para(anchor_link("بازگشت به تیترها ↑", "top")))
+    part["nav"] = [buttons([("خواندن متن کامل ↗", s.url, "primary"),
+                            ("کانال رادار", "https://t.me/ai_newsBY", "link")]),
+                   para(anchor_link("بازگشت به تیترها ↑", "top"))]
+
+    orders = {
+        "report":   ("summary", "photo", "metric", "why", "math", "facts",
+                     "citation", "map", "meta", "echo", "nav"),
+        "figure":   ("photo", "metric", "summary", "why", "facts", "math",
+                     "map", "citation", "meta", "echo", "nav"),
+        "dossier":  ("metric", "facts", "summary", "photo", "why", "math",
+                     "citation", "map", "meta", "echo", "nav"),
+        "briefing": ("why", "summary", "facts", "photo", "metric", "math",
+                     "map", "citation", "meta", "echo", "nav"),
+    }
+    order = orders.get(shape, orders["report"])
+
+    out: list[dict] = [anchor(f"s{rank}")]
+    for name in order:
+        out += part.get(name, [])
     return out
 
 

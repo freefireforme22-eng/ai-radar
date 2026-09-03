@@ -1534,3 +1534,61 @@ class _Monkey:
     def undo(self):
         for obj, name, old in reversed(self._saved):
             setattr(obj, name, old)
+
+
+def test_story_shapes_differ_inside_one_bulletin():
+    """Post 128 measured: seven story cards, all assembled in the same order —
+    scrolling one bulletin looked like the same card seven times. Neighbouring
+    cards must not share an arrangement."""
+    from datetime import datetime, timezone
+    from radar import render
+
+    stories = []
+    for n in range(6):
+        s = _story_ready("models")
+        s.title_fa = f"خبر {n}"
+        s.image = f"https://example.com/{n}.jpg"
+        s.metric_label, s.metric_value = "ارزش", "۱۰ میلیارد دلار"
+        s.why_fa = "چون بازار را عوض می‌کند."
+        s.facts = ["مدل ۷۰ میلیارد پارامتر دارد."]
+        stories.append(s)
+
+    payload = render.build(stories, "جمع‌بندی")
+
+    def order(blocks):
+        return [b["type"] for b in blocks]
+
+    cards = []
+    for sec in [b for b in payload["blocks"] if b["type"] == "details"]:
+        for st in [b for b in (sec.get("blocks") or []) if b["type"] == "details"]:
+            cards.append(order(st["blocks"]))
+
+    assert len(cards) >= 4, cards
+    for a, b in zip(cards, cards[1:]):
+        assert a != b, f"two adjacent cards share an arrangement: {a}"
+    assert len({tuple(c) for c in cards}) >= 3, cards
+
+
+def test_every_story_shape_keeps_every_part_exactly_once():
+    """A typo in one shape's order tuple would silently DROP a story's picture or
+    its key points — the same class of bug as the layout tuples."""
+    from radar import render
+    s = _story_ready("models")
+    s.image = "https://example.com/a.jpg"
+    s.metric_label, s.metric_value = "دقت", "۹۴٪"
+    s.why_fa, s.impact_fa = "مهم است.", "عوض می‌شود."
+    s.facts = ["مدل ۷۰ میلیارد پارامتر دارد."]
+    s.citation = "@misc{x}"
+    s.latex = "E=mc^2"
+    s.map_lat, s.map_lon, s.map_label = 1.0, 2.0, "جایی"
+
+    style = render._SECTION_STYLE["models"]
+    baseline = None
+    for shape in render._STORY_SHAPES:
+        got = render._story_blocks(s, 1, style, shape=shape)
+        counts = {}
+        for b in got:
+            counts[b["type"]] = counts.get(b["type"], 0) + 1
+        if baseline is None:
+            baseline = counts
+        assert counts == baseline, f"{shape} changed the parts, not just the order"
