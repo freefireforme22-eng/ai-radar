@@ -44,6 +44,11 @@ class Story:
     metric_label: str = ""     # the one number that matters, labelled
     metric_value: str = ""
     latex: str = ""            # formula/benchmark expression, research items only
+    # Blocks that only SOME stories carry, so no two posts have the same shape.
+    citation: str = ""         # BibTeX card for arXiv papers -> `pre` block
+    map_lat: float = 0.0       # geography-driven stories -> `map` block
+    map_lon: float = 0.0
+    map_label: str = ""
 
     @property
     def fingerprint(self) -> str:

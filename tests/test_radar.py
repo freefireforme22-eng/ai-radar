@@ -881,3 +881,98 @@ def test_narration_failure_returns_empty_string(monkeypatch):
     from radar import audio as tts
     monkeypatch.setattr(tts, "synthesise", lambda *a, **k: "")
     assert tts.narrate("جمع‌بندی", ["تیتر"], 123) == ""
+
+
+# ── per-story block variety (map / citation) ──────────────────────────────
+def test_arxiv_story_gets_a_monospace_citation_card():
+    """`pre` finally earns its place: a BibTeX card for a paper, which no other
+    story in the bulletin carries."""
+    from radar import geo
+    s = _story_ready("models")
+    s.url = "https://arxiv.org/abs/2509.04321"
+    s.title_en = "Sparse Kernels for Long Context"
+    s.citation = geo.citation(s.url, s.title_en, "arXiv cs.LG")
+    payload = render.build([s], "")
+    pres = [b for b in _walk(payload["blocks"]) if b["type"] == "pre"]
+    assert pres, "arXiv story must carry a citation card"
+    assert "2509.04321" in pres[0]["text"]
+    assert pres[0]["language"] == "bibtex"
+
+
+def test_non_arxiv_story_has_no_citation_card():
+    payload = render.build([_story_ready("business")], "")
+    assert not [b for b in _walk(payload["blocks"]) if b["type"] == "pre"]
+
+
+def test_map_block_matches_the_probed_shape():
+    """Probed live: `location` object is required; a flat lat/lon is rejected."""
+    s = _story_ready("policy")
+    s.map_lat, s.map_lon, s.map_label = 50.8467, 4.3525, "بروکسل"
+    payload = render.build([s], "")
+    maps = [b for b in _walk(payload["blocks"]) if b["type"] == "map"]
+    assert len(maps) == 1
+    assert maps[0]["location"] == {"latitude": 50.8467, "longitude": 4.3525}
+    assert maps[0]["caption"]["text"][1] == "بروکسل"
+
+
+def test_only_one_story_per_bulletin_gets_a_map():
+    """Three maps in a row would be the same monotony, in map form. `decorate`
+    stops after the first hit."""
+    from radar import enrich, geo
+    calls = []
+
+    def fake_locate(text):
+        calls.append(text)
+        return (1.0, 2.0, "جایی")
+
+    original = geo.locate
+    geo.locate = fake_locate
+    try:
+        stories = [_story_ready("policy") for _ in range(3)]
+        for st in stories:
+            st.summary_en = "The European Union said..."
+        enrich.decorate(stories)
+    finally:
+        geo.locate = original
+    assert len(calls) == 1, "must stop geocoding after the first match"
+    assert sum(1 for st in stories if st.map_lat) == 1
+
+
+def test_geocoder_budget_is_capped():
+    """A runaway bulletin must not hammer Nominatim: the module enforces its own
+    lookup ceiling."""
+    from radar import geo
+    geo.reset()
+    assert geo._MAX_LOOKUPS <= 3
+    geo._lookups = geo._MAX_LOOKUPS
+    assert geo._geocode("Brussels, Belgium") is None, "budget must block lookups"
+    geo.reset()
+
+
+def test_citation_is_skipped_for_a_bare_arxiv_listing_url():
+    from radar import geo
+    assert geo.citation("https://arxiv.org/list/cs.AI/recent", "X", "arXiv") == ""
+
+
+def test_hybrid_persian_latin_words_are_repaired():
+    """Live 5119 shipped «خودregressive» (from "autoregressive"): the model
+    translated the prefix and kept the English stem. The audit is blind to it —
+    the token is mostly Persian, so the Latin *word* count barely moves."""
+    from radar.enrich import _translate_stragglers as tr
+    assert tr("تولید خودregressive توکن‌ها") == "تولید خودبازگشتی توکن‌ها"
+    assert tr("یادگیری خودsupervised") == "یادگیری خودنظارت‌شده"
+    assert tr("مدل چندmodal") == "مدل چندوجهی"
+
+
+def test_unknown_hybrid_tail_is_dropped_not_shipped():
+    """An unrecognised Latin tail glued to Persian is residue either way; keeping
+    the Persian head is the lesser evil."""
+    from radar.enrich import _translate_stragglers as tr
+    assert "fineturning" not in tr("روش خودfineturning دارد")
+
+
+def test_hybrid_repair_leaves_real_names_and_persian_alone():
+    from radar.enrich import _translate_stragglers as tr
+    for safe in ("Hugging Face و OpenAI مدل دادند", "دقت مدل GPT-5 بالاست",
+                 "ترنسفورمر و رمزگذار سالم بمانند"):
+        assert tr(safe) == safe

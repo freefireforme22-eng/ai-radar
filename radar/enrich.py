@@ -8,7 +8,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
-from . import config, llm
+from . import config, geo, llm
 from .sources import Story, fetch_article_and_image
 
 SYSTEM = (
@@ -593,7 +593,33 @@ def _translate_stragglers(text: str) -> str:
             return m.group(1)
         return _EN_TO_FA[m.group(1)]
 
-    return _EN_TO_FA_RE.sub(keep_names, text)
+    return _fuse_hybrids(_EN_TO_FA_RE.sub(keep_names, text))
+
+
+# Hybrid words are the worst residue because the audit cannot see them: the token
+# «خودregressive» (live message 5119, from "autoregressive") is mostly Persian, so
+# the Latin-word count barely moves and the ratio stays high. They occur when the
+# model translates the prefix and abandons the stem. Fixing the stems that
+# actually appear in AI writing is cheap; the general rule (Persian letter glued
+# directly to a lowercase Latin run) then catches the rest by stripping the
+# fragment rather than shipping it.
+_HYBRID_STEM = {
+    "regressive": "بازگشتی", "supervised": "نظارت‌شده", "attention": "توجه",
+    "encoder": "رمزگذار", "decoder": "رمزگشا", "transformer": "ترنسفورمر",
+    "embedding": "برداری", "tuning": "تنظیم", "training": "آموزش",
+    "inference": "استنتاج", "learning": "یادگیری", "modal": "وجهی",
+    "lingual": "زبانه", "scaling": "مقیاس‌پذیری", "grained": "دانه",
+}
+_HYBRID = re.compile(r"([\u0600-\u06FF\u200c]+)([a-z]{4,})")
+
+
+def _fuse_hybrids(text: str) -> str:
+    def fix(m: re.Match) -> str:
+        head, tail = m.group(1), m.group(2)
+        if tail in _HYBRID_STEM:
+            return f"{head}{_HYBRID_STEM[tail]}"
+        return head          # drop an unrecognised Latin tail, keep the Persian
+    return _HYBRID.sub(fix, text)
 
 
 # ── orthographic repair ───────────────────────────────────────────────────
@@ -774,7 +800,27 @@ def localise(stories: list[Story], workers: int = 4) -> list[Story]:
         results = list(ex.map(_localise_one, stories))
     ready = [s for s in results if s is not None]
     verify_images(ready, workers=workers)
+    decorate(ready)
     return ready
+
+
+def decorate(stories: list[Story]) -> None:
+    """Attach the blocks only some stories get, so posts differ in SHAPE.
+
+    A citation card for every arXiv paper (cheap, offline, no network), and a
+    map for at most ONE story per bulletin — the first whose English text names
+    a place the geocoder recognises. Capping it at one is deliberate: three maps
+    in a row would be the same monotony the user complained about, in map form.
+    """
+    for s in stories:
+        s.citation = geo.citation(s.url, s.title_en, s.source)
+
+    geo.reset()
+    for s in stories:
+        hit = geo.locate(f"{s.title_en}\n{s.summary_en}")
+        if hit:
+            s.map_lat, s.map_lon, s.map_label = hit
+            return
 
 
 # Telegram fetches a photo URL server-side, and a single unfetchable one fails

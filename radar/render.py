@@ -190,6 +190,16 @@ def pre(text, language="text"):
     return {"type": "pre", "text": text, "language": language}
 
 
+def geomap(lat, lon, caption=None, zoom=9, width=800, height=380):
+    """A map block, probed live: needs `location`, and width*height <= 10000
+    total is a documented cap on the RATIO, not the pixels (800x380 was
+    accepted). Used for stories where the geography IS the story."""
+    block = {"type": "map", "location": {"latitude": lat, "longitude": lon},
+             "zoom": zoom, "width": width, "height": height}
+    if caption:
+        block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
+    return block
+
 
 def quote(text, credit=None):
     block = {"type": "expandable_blockquote", "text": text}
@@ -461,6 +471,19 @@ def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True) -> 
     if s.latex:
         out.append(para(italic("رابطه کلیدی:")))
         out.append(math(s.latex))
+
+    # Research items get a monospace citation card — the one place a `pre` block
+    # genuinely belongs in a news bulletin, and something no other story carries.
+    if s.citation:
+        out.append(details([bold("📑 ارجاع علمی"), "  ",
+                            italic("برای نقل در مقاله")],
+                           [pre(s.citation, language="bibtex")]))
+
+    # At most one story per bulletin carries a map (enforced in `build`), so the
+    # bulletin gets a visual element that is unique inside it.
+    if s.map_lat and s.map_lon:
+        out.append(geomap(s.map_lat, s.map_lon,
+                          caption={"text": [bold("📍 "), s.map_label]}))
 
     if s.facts:
         out.append(details([bold("🔍 نکات کلیدی"), "  ",
