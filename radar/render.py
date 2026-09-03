@@ -293,22 +293,28 @@ def _tehran_now() -> datetime:
 _THEMES = [
     {"mark": "🛰", "accent": "primary", "digest": "pullquote",
      "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage",
-     "voice": "fa-IR-DilaraNeural"},
+     "voice": "fa-IR-DilaraNeural",
+     "board_size": 5, "layout": ("hero", "digest", "audio", "nav", "board", "gallery")},
     {"mark": "🌐", "accent": "success", "digest": "blockquote",
      "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow",
-     "voice": "fa-IR-FaridNeural"},
+     "voice": "fa-IR-FaridNeural",
+     "board_size": 4, "layout": ("digest", "hero", "board", "audio", "nav", "gallery")},
     {"mark": "🧭", "accent": "danger", "digest": "expandable",
      "rule": "━━━━━", "glance": "📌", "gallery": "collage",
-     "voice": "fa-IR-FaridNeural"},
+     "voice": "fa-IR-FaridNeural",
+     "board_size": 5, "layout": ("hero", "board", "digest", "gallery", "audio", "nav")},
     {"mark": "🔭", "accent": "link", "digest": "pullquote",
      "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow",
-     "voice": "fa-IR-DilaraNeural"},
+     "voice": "fa-IR-DilaraNeural",
+     "board_size": 3, "layout": ("audio", "hero", "digest", "board", "gallery", "nav")},
     {"mark": "📡", "accent": "success", "digest": "expandable",
      "rule": "⋄ ⋄ ⋄ ⋄", "glance": "🔎", "gallery": "collage",
-     "voice": "fa-IR-DilaraNeural"},
+     "voice": "fa-IR-DilaraNeural",
+     "board_size": 4, "layout": ("board", "hero", "digest", "audio", "gallery", "nav")},
     {"mark": "🛠", "accent": "primary", "digest": "blockquote",
      "rule": "═════", "glance": "🧩", "gallery": "slideshow",
-     "voice": "fa-IR-FaridNeural"},
+     "voice": "fa-IR-FaridNeural",
+     "board_size": 5, "layout": ("hero", "audio", "board", "gallery", "digest", "nav")},
 ]
 
 # Section accents. The heading sizes genuinely differ (they were all 3 before,
@@ -361,38 +367,49 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "") ->
     # read as "هیچ عکسی نیست" even though it shipped two photos.
     with_art = [s for s in stories if s.image]
     lead = with_art[0] if with_art else None
+
+    # ── movable segments ─────────────────────────────────────────────────
+    # Rotating quote shapes and dividers was not enough: the block SEQUENCE was
+    # byte-identical across themes, so posts still "همه شبیه هم" at a glance.
+    # The opening is what a reader sees first, so the running ORDER of the
+    # segments rotates too — one slot leads with the picture, the next with the
+    # headline board, the next with the narration.
+    seg: dict[str, list[dict]] = {}
+
     if lead is not None:
-        blocks.append(photo(lead.image, caption={"text": [
-            bold("تصویر شاخص  ·  "), lead.title_fa]}))
+        seg["hero"] = [photo(lead.image, caption={"text": [
+            bold("تصویر شاخص  ·  "), lead.title_fa]})]
 
     if summary_fa:
-        blocks.append(_digest_block(th["digest"], summary_fa))
+        seg["digest"] = [_digest_block(th["digest"], summary_fa)]
 
     # Narrated edition: the single strongest answer to "فقط متنه" — a bulletin
     # you can listen to. Optional by design; if TTS or the upload failed,
     # `narration_id` is "" and the bulletin ships unchanged.
     if narration_id:
-        blocks.append(audio(narration_id, caption={"text": [
+        seg["audio"] = [audio(narration_id, caption={"text": [
             bold("🎧 روایت صوتی این بولتن"), "  ·  ",
-            italic("خوانده‌شده به فارسی")]}))
+            italic("خوانده‌شده به فارسی")]})]
 
-    blocks.append(buttons([
+    seg["nav"] = [buttons([
         ("📡 کانال رادار", "https://t.me/ai_newsBY", th["accent"]),
         ("🔗 منبع خبر اول", stories[0].url if stories else "https://t.me/ai_newsBY", "link"),
-    ]))
+    ])]
 
     # Headline board: titles, not a bare list. Each entry is its own heading with
     # a jump link into the full item, so the post is navigable from the top.
-    blocks.append(divider())
-    blocks.append(heading(f"{th['glance']} تیترهای این بولتن", size=2))
+    board: list[dict] = [divider(),
+                         heading(f"{th['glance']} تیترهای این بولتن", size=2)]
     for i, s in enumerate(stories, 1):
-        blocks.append(heading([sup(f"{i}".translate(_DIGITS)), " ", s.title_fa], size=5))
+        board.append(heading([sup(f"{i}".translate(_DIGITS)), " ", s.title_fa],
+                             size=th["board_size"]))
         line: list = []
         if s.metric_label and s.metric_value:
             line += [marked(f" {s.metric_label}: {s.metric_value} "), "  "]
         line += [italic(s.source_fa), "  ·  ",
                  anchor_link("خواندن ↓", f"s{i}")]
-        blocks.append(para(line))
+        board.append(para(line))
+    seg["board"] = board
 
     # Mid-message gallery: a second band of visible art, drawn from stories that
     # are NOT the lead so no picture is shown twice. `gallery` stays empty unless
@@ -402,9 +419,12 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "") ->
     spare = [s.image for s in with_art[1:4]]
     if len(spare) >= 2:
         gallery = spare
-        blocks.append(para(italic(th["rule"])))
         maker = collage if th["gallery"] == "collage" else slideshow
-        blocks.append(maker(gallery, caption="قاب‌های امروز"))
+        seg["gallery"] = [para(italic(th["rule"])),
+                          maker(gallery, caption="قاب‌های امروز")]
+
+    for name in th["layout"]:
+        blocks += seg.get(name, [])
 
     blocks.append(divider())
 

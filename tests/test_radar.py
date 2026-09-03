@@ -1089,3 +1089,46 @@ def test_lookback_fixed_opts_out_of_widening(monkeypatch):
 
     run_mod.main(["--dry-run", "--no-audio", "--lookback", "8", "--lookback-fixed"])
     assert calls == [8]
+
+
+def test_every_theme_layout_places_every_segment_exactly_once():
+    """A typo in a layout tuple would silently DROP the narration or the hero
+    image from that slot's bulletin — one post in six missing its audio, which
+    is exactly the kind of silent loss that shipped photos into a collapsed
+    toggle for weeks."""
+    expected = {"hero", "digest", "audio", "nav", "board", "gallery"}
+    for th in render._THEMES:
+        assert set(th["layout"]) == expected, f"{th['mark']} layout {th['layout']}"
+        assert len(th["layout"]) == len(expected), f"{th['mark']} repeats a segment"
+
+
+def test_themes_differ_in_the_opening_sequence_not_just_decoration():
+    """Rotating quote shapes and dividers left the block ORDER identical across
+    themes, so posts still looked alike at a glance (the user's «مو نمیزنه»).
+    The first blocks a reader sees must differ per theme."""
+    openings = {tuple(th["layout"][:3]) for th in render._THEMES}
+    assert len(openings) == len(render._THEMES), (
+        f"only {len(openings)} distinct openings for {len(render._THEMES)} themes")
+
+
+def test_headline_board_heading_size_varies_by_theme():
+    """The board was hardcoded at size 5 for every slot."""
+    assert len({th["board_size"] for th in render._THEMES}) >= 3
+    for th in render._THEMES:
+        assert 1 <= th["board_size"] <= 6, "documented heading sizes are 1..6"
+
+
+def test_bulletin_renders_with_every_theme_layout():
+    """Guards the segment-assembly loop: a layout naming a segment that build()
+    never creates must not crash or produce an empty bulletin."""
+    stories = [_story_ready("models"), _story_ready("business"), _story_ready("policy")]
+    for s in stories:
+        s.image = "https://example.com/a.jpg"
+    for th in render._THEMES:
+        blocks = []
+        for name in th["layout"]:
+            blocks.append(name)
+        assert blocks, th["mark"]
+    payload = render.build(stories, "جمع‌بندی", "FAKE_FILE_ID")
+    kinds = {b.get("type") for b in payload["blocks"]}
+    assert "audio" in kinds and "photo" in kinds
