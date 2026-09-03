@@ -314,3 +314,26 @@ def test_scrape_source_config_is_well_formed():
         for key in ("name", "fa", "tier", "index", "base", "link_re", "date_re"):
             assert key in src, f"{src.get('name')} missing {key}"
         assert src["index"].startswith("https://")
+
+
+# ── the boundary class must exclude punctuation and digits ────────────────
+def test_brand_before_persian_comma_is_repaired():
+    """A live audited bulletin shipped «مدیرعامل انویدیا، و جرج کورتز».
+
+    U+060C (Persian comma) sits inside U+0600-U+06FF, so the old boundary class
+    treated it as a letter and refused to repair a name followed by a comma —
+    which is where names sit constantly in Persian prose.
+    """
+    from radar.enrich import _repair_translit
+    assert _repair_translit("مدیرعامل انویدیا، و جرج کورتز") == "مدیرعامل Nvidia، و جرج کورتز"
+    assert _repair_translit("انویدیا؛ شرکت پیشرو") == "Nvidia؛ شرکت پیشرو"
+    assert _repair_translit("انویدیا؟") == "Nvidia؟"
+    assert _repair_translit("محصول جدید آنتروپیک، کلاد ۴") == "محصول جدید Anthropic، Claude 4"
+
+
+def test_boundary_still_protects_ordinary_words():
+    """The fix must not reopen the «پرونده» → «Proنده» corruption."""
+    from radar.enrich import _repair_translit
+    for word in ("پرونده قضایی", "پرونده\u200cهای حقوقی", "فلشبک",
+                 "کلادسازی", "میسترالی", "حافظه فلش"):
+        assert _repair_translit(word) == word, word

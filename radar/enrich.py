@@ -172,7 +172,19 @@ TRANSLIT_FIX = {
 # Persian letters + ZWNJ. Used as a word boundary so a key can never be
 # replaced mid-word: without this, "پرو" → "Pro" turns "پرونده" (case file)
 # into "Proنده". That corruption reached a live preview post.
-_FA_CHAR = r"\u0600-\u06FF\u200c"
+#
+# The class must contain LETTERS ONLY. It used to be the whole U+0600–U+06FF
+# block, which also holds Persian punctuation (، ؛ ؟ ٪) and Persian digits
+# (۰–۹). A brand followed by a comma therefore failed the boundary test and was
+# never repaired: an audited bulletin shipped "مدیرعامل انویدیا، و جرج کورتز"
+# while the identical phrase followed by a space became "Nvidia" correctly.
+# Persian prose puts a comma after a name constantly, so this single character
+# class silently disabled the repair on a large share of real sentences.
+_FA_CHAR = (r"\u0620-\u065F"      # Arabic/Persian letters + attached harakat
+            r"\u066E-\u06D3"      # extended letters (گ چ پ ژ ک ی …)
+            r"\u06D5-\u06DC"      # heh with hamza + attached marks
+            r"\u06E5\u06E6\u06EE\u06EF\u06FA-\u06FF"
+            r"\u200c")            # ZWNJ (nim-fasele) joins parts of one word
 _TRANSLIT_RE = re.compile(
     r"(?<![" + _FA_CHAR + r"])(" + "|".join(
         re.escape(k) for k in sorted(TRANSLIT_FIX, key=len, reverse=True)
