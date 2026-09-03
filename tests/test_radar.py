@@ -1144,3 +1144,44 @@ def test_zero_fresh_stories_still_widens_before_going_silent():
     guard = [l for l in src.splitlines() if "config.MIN_STORIES" in l][0]
     assert "fresh and" not in guard, (
         "the widen must also run when the fresh count is zero: " + guard.strip())
+
+
+def test_backfill_respects_a_section_ceiling():
+    """Post 110 shipped 6 of 9 stories from `models` (eight arXiv cards): the
+    backfill loop ignored MAX_PER_SECTION outright, so any widened window --
+    which is mostly arXiv -- became a research digest."""
+    from radar import enrich
+    from datetime import timedelta
+    pool = []
+    for i in range(12):
+        s = Story(title_en=f"Paper {i}", url=f"https://arxiv.org/abs/26{i:02d}.1",
+                  source="arXiv cs.AI", source_fa="آرکایو", tier=3,
+                  published=datetime.now(timezone.utc) - timedelta(hours=1))
+        s.section = "models"
+        s.score = 9 - i * 0.1
+        pool.append(s)
+    for i in range(2):
+        s = Story(title_en=f"Deal {i}", url=f"https://example.com/biz{i}",
+                  source="Test", source_fa="تست", tier=1,
+                  published=datetime.now(timezone.utc) - timedelta(hours=1))
+        s.section = "business"
+        s.score = 5
+        pool.append(s)
+
+    picked = enrich._spread(pool, keep=9)
+    models = sum(1 for s in picked if s.section == "models")
+    ceiling = config.MAX_PER_SECTION + config.BACKFILL_SLACK
+    assert models <= ceiling, f"{models} models items exceed the ceiling {ceiling}"
+
+
+def test_citation_cards_are_capped_per_bulletin():
+    """Eight BibTeX cards in post 110: a block on every story is wallpaper, and
+    'every story looks the same' is the complaint this feature was meant to fix."""
+    stories = []
+    for i in range(6):
+        s = _story_ready("models")
+        s.citation = f"@misc{{x{i}}}"
+        stories.append(s)
+    payload = render.build(stories, "جمع‌بندی")
+    cards = sum(1 for b in _walk(payload["blocks"]) if b.get("type") == "pre")
+    assert cards <= render._MAX_CITATIONS, f"{cards} citation cards rendered"

@@ -112,8 +112,16 @@ def triage(stories: list[Story], keep: int | None = None) -> list[Story]:
             s.section = _guess_section(s.title_en)
         ranked = pool
     ranked.sort(key=lambda s: (-s.score, s.tier))
+    return _spread(ranked, keep)
 
-    # Spread across sections so one topic can't fill the whole bulletin.
+
+def _spread(ranked: list[Story], keep: int) -> list[Story]:
+    """Pick `keep` stories without letting one section swallow the bulletin.
+
+    Extracted from `triage` so the balance rules are testable without an LLM
+    call — the unbounded-backfill bug that produced post 110 was invisible to
+    every existing test because they all stopped at the primary cap.
+    """
     picked: list[Story] = []
     per: dict[str, int] = {}
     for s in ranked:
@@ -123,11 +131,21 @@ def triage(stories: list[Story], keep: int | None = None) -> list[Story]:
         per[s.section] = per.get(s.section, 0) + 1
         if len(picked) >= keep:
             break
-    for s in ranked:                      # backfill if sections were sparse
+
+    # Backfill when sections were sparse — but the backfill USED TO IGNORE the
+    # cap entirely, which is how channel post 110 shipped 6 `models` items out
+    # of 9 and eight near-identical arXiv cards. A widened window is mostly
+    # arXiv, so the unbounded backfill turned every thin day into a research
+    # digest. The ceiling is deliberately looser than the primary cap: filling
+    # the bulletin still matters more than perfect balance.
+    ceiling = config.MAX_PER_SECTION + config.BACKFILL_SLACK
+    for s in ranked:
         if len(picked) >= keep:
             break
-        if s not in picked:
-            picked.append(s)
+        if s in picked or per.get(s.section, 0) >= ceiling:
+            continue
+        picked.append(s)
+        per[s.section] = per.get(s.section, 0) + 1
     return picked
 
 

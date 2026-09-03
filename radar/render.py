@@ -328,6 +328,9 @@ _SECTION_STYLE = {
     "tools":    {"size": 5, "quote": "expandable", "bullet": "I"},
 }
 
+# A per-story extra that appears on EVERY story is wallpaper, not variety.
+_MAX_CITATIONS = 2
+
 
 def _theme(now: datetime) -> dict:
     """Pick this slot's theme.
@@ -434,6 +437,20 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "") ->
         by_section.setdefault(s.section, []).append(s)
 
     rank = {id(s): i for i, s in enumerate(stories, 1)}
+
+    # Cap the repeatable per-story extras. Post 110 shipped EIGHT identical-looking
+    # BibTeX cards because the widened window was almost all arXiv: a block that
+    # appears on every story stops being a distinguishing feature and becomes
+    # wallpaper, which is the original complaint in a new costume. Keep the first
+    # few and drop the rest for this render only.
+    seen_citations = 0
+    for s in stories:
+        if not s.citation:
+            continue
+        seen_citations += 1
+        if seen_citations > _MAX_CITATIONS:
+            s.citation = ""
+
     first = True
     for key, label in config.SECTIONS:
         group = by_section.get(key) or []

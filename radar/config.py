@@ -71,6 +71,10 @@ USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 # ── Editorial shape ───────────────────────────────────────────────────────
 MAX_STORIES = 9           # per bulletin; more than this and the toggles get unreadable
 MAX_PER_SECTION = 3
+# How far the backfill may exceed MAX_PER_SECTION when other sections are empty.
+# Post 110 shipped 6 of 9 stories from `models` (eight arXiv cards) because the
+# backfill ignored the cap outright; a widened window is mostly arXiv.
+BACKFILL_SLACK = 1
 LOOKBACK_HOURS = 8        # slight overlap with the 6h cadence so nothing slips through
 # A bulletin with one story is worse than no bulletin: measured live on channel
 # post 106, where 8 of 9 stories in the window had already been published and
