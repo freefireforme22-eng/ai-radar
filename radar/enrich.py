@@ -937,7 +937,11 @@ def _fa_digits(text: str) -> str:
         # «۲K و ۴K» — the regex starts at a letter, so the leading digit was
         # converted on its own and left a mixed-script token inside one word,
         # the same class of defect as «خودregressive» but in the other order.
-        head = re.search(r"\d+$", text[:start])
+        # The prefix can itself be decimal: live post 141 shipped «رزولوشن ۲.8K»
+        # because `\d+$` only reached back over the "8" of "2.8K", so the "2"
+        # converted and split the token one character further left. Same defect,
+        # one digit deeper.
+        head = re.search(r"\d+(?:[.,]\d+)*$", text[:start])
         if head:
             start = head.start()
         # extend over a trailing " 5.2" style version suffix

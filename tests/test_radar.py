@@ -1630,6 +1630,11 @@ def test_digit_prefixed_units_stay_ascii():
     assert "۹۴.۲" in _fa_digits("دقت 94.2 درصد")
     # and version suffixes keep working
     assert "GPT-5.2" in _fa_digits("مدل GPT-5.2 منتشر شد")
+    # A DECIMAL prefix, from live post 141 («رزولوشن ۲.8K»): reaching back over
+    # one digit run left the "2" outside the protected span and split the token
+    # one character further left.
+    assert "2.8K" in _fa_digits("نمایشگر ۱۴ اینچی با رزولوشن 2.8K")
+    assert "۶.۷" in _fa_digits("نمایشگر 6.7 اینچی")  # not a unit: still localised
 
 
 def test_animated_chart_counts_match_the_bulletin():
