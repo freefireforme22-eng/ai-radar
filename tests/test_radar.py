@@ -1132,3 +1132,15 @@ def test_bulletin_renders_with_every_theme_layout():
     payload = render.build(stories, "جمع‌بندی", "FAKE_FILE_ID")
     kinds = {b.get("type") for b in payload["blocks"]}
     assert "audio" in kinds and "photo" in kinds
+
+
+def test_zero_fresh_stories_still_widens_before_going_silent():
+    """Measured right after the widen shipped: 13 stories in the 8h window, 0
+    unseen -> the run went silent, while 124 unseen items sat in the 24h window.
+    Guarding zero separately because `if fresh and ...` reads as correct."""
+    import inspect
+    from radar import run as run_mod
+    src = inspect.getsource(run_mod.main)
+    guard = [l for l in src.splitlines() if "config.MIN_STORIES" in l][0]
+    assert "fresh and" not in guard, (
+        "the widen must also run when the fresh count is zero: " + guard.strip())

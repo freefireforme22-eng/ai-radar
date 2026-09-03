@@ -67,8 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     # ONE story because 8 of the 9 in the window were already published, and a
     # single-item bulletin has no gallery, no sections, nothing to read. Widen
     # the window until there is enough material rather than posting something
-    # empty — older-but-unseen beats fresh-but-alone.
-    if fresh and len(fresh) < config.MIN_STORIES and not args.lookback_fixed:
+    # empty — older-but-unread beats fresh-but-alone.
+    #
+    # This must fire at zero too, not just at "thin". Measured immediately after
+    # the first version shipped: the next run found 13 stories in the 8h window
+    # and 0 unseen, so it went silent — while 124 unseen items sat in the 24h
+    # window. Silence with a full backlog is the dead channel all over again.
+    if len(fresh) < config.MIN_STORIES and not args.lookback_fixed:
         for hours in config.WIDEN_LADDER:
             if hours <= args.lookback:
                 continue
