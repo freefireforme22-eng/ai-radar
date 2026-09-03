@@ -287,3 +287,30 @@ def test_digest_and_summary_share_the_same_repairs():
     for field in ("title_fa", "summary_fa", "why_fa"):
         line = [l for l in src.splitlines() if l.strip().startswith(f"{field} =")][0]
         assert "_fix_spelling" in line and "_repair_translit" in line, field
+
+
+# ── scraped sources (Anthropic publishes no RSS at all) ──────────────────
+def test_scrape_date_parses_index_format():
+    from radar.sources import _scrape_date
+    got = _scrape_date("Announcements Sep 1, 2026 Some headline", r"([A-Z][a-z]{2} \d{1,2}, \d{4})")
+    assert got is not None and (got.year, got.month, got.day) == (2026, 9, 1)
+
+
+def test_scrape_date_returns_none_when_absent():
+    from radar.sources import _scrape_date
+    assert _scrape_date("no date here", r"([A-Z][a-z]{2} \d{1,2}, \d{4})") is None
+
+
+def test_anthropic_is_trusted_topical():
+    """Anthropic ships no feed, so its stories arrive via the scraper; they must
+    not then be dropped by the keyword filter for lacking an 'AI' token."""
+    from radar.sources import _TRUSTED_TOPICAL
+    assert "Anthropic" in _TRUSTED_TOPICAL
+
+
+def test_scrape_source_config_is_well_formed():
+    from radar.sources import SCRAPE_SOURCES
+    for src in SCRAPE_SOURCES:
+        for key in ("name", "fa", "tier", "index", "base", "link_re", "date_re"):
+            assert key in src, f"{src.get('name')} missing {key}"
+        assert src["index"].startswith("https://")

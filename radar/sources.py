@@ -200,6 +200,93 @@ _STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
          "why", "what", "says", "said", "can", "could", "more", "than", "but"}
 
 
+# ── sources with no usable feed ───────────────────────────────────────────
+# Anthropic is a tier-1 AI lab with no RSS at all: every documented endpoint
+# (news.rss, rss.xml, feed.xml, atom.xml, /news/index.xml) returns 404, the
+# RSSHub mirror answers 403, and openrss.org serves an HTML page rather than a
+# feed. Verified by probing all of them. Skipping Anthropic means Claude
+# launches never reach a Persian AI-news channel, so its index page is parsed
+# directly. The index conveniently carries a date next to every headline, which
+# is what makes the lookback window still work.
+SCRAPE_SOURCES = [
+    {
+        "name": "Anthropic",
+        "fa": "آنتروپیک",
+        "tier": 1,
+        "index": "https://www.anthropic.com/news",
+        "base": "https://www.anthropic.com",
+        "link_re": r'href="(/news/[a-z0-9\-]+)"(.{0,900}?)</a>',
+        "date_re": r"([A-Z][a-z]{2} \d{1,2}, \d{4})",
+    },
+]
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
+
+# Category chips that sit inside the same anchor as the headline.
+_SCRAPE_LABELS = {"Announcements", "Product", "Policy", "Research",
+                  "Societal Impacts", "Interpretability", "Alignment"}
+
+
+def _scrape_date(blob: str, pattern: str) -> datetime | None:
+    hit = re.search(pattern, blob)
+    if not hit:
+        return None
+    try:
+        month, day, year = re.match(r"([A-Z][a-z]{2}) (\d{1,2}), (\d{4})",
+                                    hit.group(1)).groups()
+        return datetime(int(year), _MONTHS[month], int(day), tzinfo=timezone.utc)
+    except (AttributeError, KeyError, ValueError):
+        return None
+
+
+def fetch_scraped(cutoff: datetime) -> list[Story]:
+    """Stories from sources that publish no feed at all.
+
+    Best-effort like fetch_feed: any failure yields nothing rather than raising,
+    because one unreachable site must never stop a bulletin from going out.
+    """
+    out: list[Story] = []
+    for src in SCRAPE_SOURCES:
+        try:
+            req = urllib.request.Request(src["index"],
+                                         headers={"User-Agent": config.USER_AGENT})
+            page = urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "replace")
+        except Exception:
+            continue
+
+        seen_slugs: set[str] = set()
+        for match in re.finditer(src["link_re"], page, re.S):
+            slug, blob = match.group(1), match.group(2)
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+            published = _scrape_date(re.sub(r"<[^>]+>", " ", blob), src["date_re"])
+            if published is None or published < cutoff:
+                continue
+            # The anchor's own opening tag is still attached to the blob (the
+            # regex captures from just after the href value), so its class
+            # attribute would otherwise be mistaken for text. Drop it first.
+            inner = blob.split(">", 1)[1] if ">" in blob else blob
+            fragments = [clean_text(f, 300) for f in re.split(r"<[^>]+>", inner)]
+            fragments = [f for f in fragments
+                         if len(f) > 8
+                         and not re.fullmatch(src["date_re"], f)
+                         and f not in _SCRAPE_LABELS]
+            if not fragments:
+                continue
+            # Layout is category / date / headline / teaser, and the date and
+            # category are now gone, so the headline leads and the rest is body.
+            title, teaser = fragments[0], " ".join(fragments[1:])[:600]
+            out.append(Story(
+                title_en=title, url=src["base"] + slug, source=src["name"],
+                source_fa=src.get("fa", src["name"]), tier=src.get("tier", 2),
+                published=published, summary_en=teaser,
+            ))
+    return out
+
+
 def _shingle(title: str) -> set[str]:
     words = re.findall(r"[a-z0-9]+", title.lower())
     return {w for w in words if w not in _STOP and len(w) > 2}
@@ -225,7 +312,7 @@ _AI_TERMS = (
 # Feeds that are AI-only by construction: skip the keyword test for them.
 _TRUSTED_TOPICAL = {"OpenAI", "DeepMind", "Hugging Face", "Mistral",
                     "arXiv cs.AI", "arXiv cs.LG", "arXiv cs.CL",
-                    "Import AI", "Google AI"}
+                    "Import AI", "Google AI", "Anthropic"}
 
 
 def is_ai_related(story: Story) -> bool:
@@ -287,6 +374,7 @@ def collect(lookback_hours: int | None = None) -> list[Story]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     with ThreadPoolExecutor(max_workers=10) as ex:
         batches = list(ex.map(lambda f: fetch_feed(f, cutoff), config.FEEDS))
+    batches.append(fetch_scraped(cutoff))
 
     seen: set[str] = set()
     stories: list[Story] = []
