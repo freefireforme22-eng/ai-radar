@@ -132,13 +132,17 @@ def main(argv: list[str] | None = None) -> int:
     # Narration is optional and must never be able to block a bulletin: any
     # failure inside `audio.narrate` returns "" and the post ships text-only.
     narration_id = ""
+    narration_kind = "audio"
     if not args.plain and not args.no_audio:
         log("synthesising the Persian narration...")
-        narration_id = audio.narrate(
+        narration_kind = render.current_narration_kind()
+        narration_id, narration_kind = audio.narrate(
             summary, [s.title_fa for s in ready],
             args.preview or config.CHANNEL_ID,
-            voice=render.current_voice())
-        log("  narration attached" if narration_id else "  narration unavailable — text only")
+            voice=render.current_voice(),
+            as_voice_note=narration_kind == "voice_note")
+        log(f"  narration attached as {narration_kind}" if narration_id
+            else "  narration unavailable — text only")
 
     # The cover card: the one element of the post that carries a real colour.
     # Same optional contract as the narration — a failure returns "" and the
@@ -178,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         payload, kind = telegram.plain_fallback(ready, summary), "plain"
     else:
         payload, kind = render.build(
-            ready, summary, narration_id, cover_id, motion_id), "rich"
+            ready, summary, narration_id, cover_id, motion_id,
+            narration_kind), "rich"
 
     if args.save_payload:
         with open(args.save_payload, "w", encoding="utf-8") as f:
@@ -211,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 mid = telegram.send_rich(
                     render.build(ready, summary, narration_id, cover_id,
-                                 motion_id), target)
+                                 motion_id, narration_kind), target)
                 log(f"posted message_id={mid} (rich, images dropped)")
                 return _save_state(args, ready, seen)
             except telegram.TelegramError as e2:

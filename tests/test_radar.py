@@ -880,7 +880,7 @@ def test_narration_failure_returns_empty_string(monkeypatch):
     """Every failure path must degrade to "" rather than raising."""
     from radar import audio as tts
     monkeypatch.setattr(tts, "synthesise", lambda *a, **k: "")
-    assert tts.narrate("جمع‌بندی", ["تیتر"], 123) == ""
+    assert tts.narrate("جمع‌بندی", ["تیتر"], 123) == ("", "")
 
 
 # ── per-story block variety (map / citation) ──────────────────────────────
@@ -1762,3 +1762,68 @@ def test_garbled_persian_is_rejected_even_though_it_is_all_persian():
                  "ممیزی امنیتی مدل تازه منتشر شد و نتایج آن عمومی است"):
         ok, why = llm.audit(good)
         assert ok, f"{good} -> {why}"
+
+
+def test_paraphrased_key_points_are_dropped_as_echo():
+    """The complaint «نکات کلیدی ... چند جمله از تو خود خبر» survived the trigram
+    gate because a paraphrase shares almost no trigrams with its source. Measured
+    over 222 facts from live posts 118-141: 11 repeated 80%+ of their own story's
+    content words while `_too_similar` flagged ZERO of them.
+
+    Real pair from live post 128 (trigram overlap 22%): the summary already says
+    the state firm admitted being three years behind Neuralink."""
+    from radar.enrich import _echoes, _too_similar
+    summary = ("چین امسال مجوز تجهیزات مختلف رابط مغز و رایانه را صادر کرده و با "
+               "یارانه‌های دولتی از استارتاپ‌های داخلی حمایت می‌کند. با این حال، یکی از "
+               "شرکت‌های پیشروی دولتی اذعان کرده که فناوری این کشور هنوز حدود سه سال "
+               "از Neuralink عقب‌تر است.")
+    echo = "یک شرکت پیشروی دولتی در چین اعتراف کرد فناوری‌اش سه سال از Neuralink عقب‌تر است."
+    assert not _too_similar(echo, summary), "trigram gate must be the one that MISSES this"
+    assert _echoes(echo, summary), "containment gate must catch it"
+
+
+def test_a_fact_with_a_new_number_survives_the_echo_gate():
+    """Containment alone would throw away additive points. Live post 128 shipped
+    «۵ مدل پشتیبان» at 78% word overlap with a figure absent from the summary —
+    trading a repetition defect for a data-loss defect is not a fix."""
+    from radar.enrich import _echoes
+    summary = "این پژوهش عاملی برای ارزیابی مدل‌های زبانی معرفی می‌کند و روی چند مدل آزمایش شده است."
+    additive = "در این پژوهش از ۵ مدل پشتیبان مختلف شامل مدل‌های متن‌باز و بسته استفاده شده است."
+    assert not _echoes(additive, summary)
+    # ... but repeating a number the summary already gave is still an echo
+    summary_with_num = "سرعت این مدل به ۱۵۰۰ توکن بر ثانیه می‌رسد و برای بارهای سنگین بهینه شده است."
+    assert _echoes("سرعت پردازش این مدل به ۱۵۰۰ توکن بر ثانیه می‌رسد.", summary_with_num)
+
+
+def test_short_points_are_left_to_the_other_gates():
+    """A 3-word point cannot be judged by word overlap without false positives;
+    `has_substance` and the length check own that case."""
+    from radar.enrich import _echoes
+    assert not _echoes("قیمت ۶۹۹ دلار", "قیمت پایه این لپ‌تاپ ۶۹۹ دلار است و در نوامبر عرضه می‌شود.")
+
+
+def test_narration_block_kind_rotates_with_the_theme():
+    """A voice bubble and an audio attachment are two different reading
+    experiences; using only one forever is the monotony the rotation exists to
+    break. Both kinds must be reachable, and the block type must follow the
+    theme's declared kind — not the other way round."""
+    kinds = {t.get("narration", "audio") for t in render._THEMES}
+    assert kinds == {"audio", "voice_note"}, kinds
+
+    stories = [_story_ready()]
+    for kind, expected in (("voice_note", "voice_note"), ("audio", "audio")):
+        payload = render.build(stories, "جمع‌بندی", narration_id="FILEID",
+                               narration_kind=kind)
+        types = [b["type"] for b in payload["blocks"]]
+        assert expected in types, (kind, types)
+        assert ("audio" if expected == "voice_note" else "voice_note") not in types
+
+
+def test_voice_note_keeps_its_caption():
+    """Re-probed live (messages 5269/5270): an older comment in this repo claimed
+    `caption` is dropped on `voice_note`. Telegram stored it. The builder must
+    therefore emit one, or the narration ships unlabelled."""
+    block = render.voice_note("FILEID", caption="روایت صوتی")
+    assert block["type"] == "voice_note"
+    assert block["voice_note"]["media"] == "FILEID"
+    assert block["caption"]["text"] == "روایت صوتی"

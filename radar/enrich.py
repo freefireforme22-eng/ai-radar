@@ -783,6 +783,10 @@ def _salvage_facts(story: Story, body: str, source: str, clean: callable) -> lis
             continue
         if _too_similar(f, story.summary_fa):
             continue
+        # Same containment gate as the main path — a salvaged point must also add
+        # something, or the salvage pass becomes a hole in the filter.
+        if _echoes(f, f"{story.summary_fa} {story.why_fa}"):
+            continue
         if any(_too_similar(f, prev) for prev in out):
             continue
         out.append(_fa_digits(f))
@@ -857,6 +861,13 @@ def _localise_one(story: Story) -> Story | None:
                 # and each point must also differ from its siblings.
                 if _too_similar(f, story.summary_fa or summary_fa):
                     continue
+                # `_too_similar` only catches COPIED wording. A point that
+                # paraphrases the summary and adds nothing scores near zero on
+                # trigrams — measured on 222 live facts, 11 slipped through that
+                # way. Containment against the summary AND the "why" catches it,
+                # because both are text the reader has already seen on the card.
+                if _echoes(f, f"{story.summary_fa or summary_fa} {why_fa}"):
+                    continue
                 if any(_too_similar(f, prev) for prev in clean_facts):
                     continue
                 # Novel wording is not the same as substance. Live post 114
@@ -901,6 +912,50 @@ def _localise_one(story: Story) -> Story | None:
 def _shingles(text: str) -> set[str]:
     words = [w for w in re.findall(r"[^\W_]+", text or "", re.UNICODE) if len(w) > 2]
     return {" ".join(words[i:i + 3]) for i in range(max(0, len(words) - 2))}
+
+
+_ECHO_STOP = set("""و در به از با که این آن را برای های ها یک است شد می بر تا هم یا
+اما نیز خود بود شده کرد کند دارد دهد آنها او ما شما نه بی هر چه اگر روی طور بین
+حال کل دیگر بیش کم شود کرده کنند نیست باشد""".split())
+
+
+def _content_words(text: str) -> set[str]:
+    """Persian content words, 3+ letters, function words dropped."""
+    return {w for w in re.findall(r"[\u0600-\u06FF]{3,}", text)
+            if w not in _ECHO_STOP}
+
+
+def _echoes(fact: str, source: str, threshold: float = 0.8) -> bool:
+    """True when `fact` adds no idea that `source` does not already carry.
+
+    This is CONTAINMENT, not similarity, and it catches what `_too_similar`
+    structurally cannot. Trigram overlap asks "was this sentence copied?"; a
+    model that paraphrases while adding nothing scores near zero on trigrams and
+    still tells the reader nothing new — exactly the complaint that the key
+    points are «چند جمله از تو خود خبر». Measured over 222 facts from live posts
+    118-141: 11 repeat 80%+ of their own story's content words while the trigram
+    gate flagged ZERO of them, because the wording had been rearranged.
+
+    Live example (post 125, trigram 17%): the summary already states 1500
+    tokens/sec, and the "key point" says the model reaches 1500 tokens/sec in
+    different words.
+
+    A fact carrying a number the source does NOT have is additive by definition
+    and survives regardless of wording overlap — post 128 shipped «۵ مدل
+    پشتیبان» at 78% containment with a genuinely new figure, and killing that
+    class would trade one defect for another.
+    """
+    wf = _content_words(fact)
+    if len(wf) < 4:
+        return False                    # too short to judge; other gates apply
+    ws = _content_words(source)
+    if not ws:
+        return False
+    if len(wf & ws) / len(wf) < threshold:
+        return False
+    fact_nums = set(re.findall(r"[\u06F0-\u06F9\d][\u06F0-\u06F9\d.,]*", fact))
+    src_nums = set(re.findall(r"[\u06F0-\u06F9\d][\u06F0-\u06F9\d.,]*", source))
+    return not (fact_nums - src_nums)
 
 
 def _too_similar(a: str, b: str, threshold: float = 0.4) -> bool:

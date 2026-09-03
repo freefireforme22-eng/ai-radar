@@ -195,12 +195,25 @@ def audio(file_id, caption=None):
     """An audio block, addressed by Telegram `file_id`.
 
     Probed live: `media` accepts a `file_id`, so narration needs no public
-    hosting (see telegram.upload_audio for how the id is minted). `sendAudio`
-    rather than `sendVoice` because `caption` SURVIVES on an `audio` block and is
-    silently dropped on `voice_note` — measured, both accepted, only one keeps
-    the label.
+    hosting (see telegram.upload_audio for how the id is minted).
     """
     block = {"type": "audio", "audio": {"type": "audio", "media": file_id}}
+    if caption:
+        block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
+    return block
+
+
+def voice_note(file_id, caption=None):
+    """A voice note — the narration as a spoken bubble, not an attachment row.
+
+    An older note here claimed `caption` is dropped on `voice_note`. Re-probed
+    on messages 5269/5270 and read back from what Telegram STORED: the caption
+    survives, and the block requires OGG/Opus (see audio.to_voice). Keeping the
+    two kinds side by side lets the theme decide which reading experience a given
+    bulletin gets.
+    """
+    block = {"type": "voice_note",
+             "voice_note": {"type": "voice_note", "media": file_id}}
     if caption:
         block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
     return block
@@ -324,32 +337,32 @@ def _tehran_now() -> datetime:
 _THEMES = [
     {"mark": "🛰", "accent": "primary", "digest": "pullquote",
      "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage",
-     "voice": "fa-IR-DilaraNeural",
+     "voice": "fa-IR-DilaraNeural", "narration": "voice_note",
      "board_size": 5,
      "layout": ("hero", "digest", "audio", "motion", "nav", "board", "gallery")},
     {"mark": "🌐", "accent": "success", "digest": "blockquote",
      "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow",
-     "voice": "fa-IR-FaridNeural",
+     "voice": "fa-IR-FaridNeural", "narration": "audio",
      "board_size": 4,
      "layout": ("digest", "hero", "board", "motion", "audio", "nav", "gallery")},
     {"mark": "🧭", "accent": "danger", "digest": "expandable",
      "rule": "━━━━━", "glance": "📌", "gallery": "collage",
-     "voice": "fa-IR-FaridNeural",
+     "voice": "fa-IR-FaridNeural", "narration": "voice_note",
      "board_size": 5,
      "layout": ("hero", "board", "digest", "gallery", "audio", "motion", "nav")},
     {"mark": "🔭", "accent": "link", "digest": "pullquote",
      "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow",
-     "voice": "fa-IR-DilaraNeural",
+     "voice": "fa-IR-DilaraNeural", "narration": "audio",
      "board_size": 3,
      "layout": ("audio", "hero", "motion", "digest", "board", "gallery", "nav")},
     {"mark": "📡", "accent": "success", "digest": "expandable",
      "rule": "⋄ ⋄ ⋄ ⋄", "glance": "🔎", "gallery": "collage",
-     "voice": "fa-IR-DilaraNeural",
+     "voice": "fa-IR-DilaraNeural", "narration": "voice_note",
      "board_size": 4,
      "layout": ("motion", "board", "hero", "digest", "audio", "gallery", "nav")},
     {"mark": "🛠", "accent": "primary", "digest": "blockquote",
      "rule": "═════", "glance": "🧩", "gallery": "slideshow",
-     "voice": "fa-IR-FaridNeural",
+     "voice": "fa-IR-FaridNeural", "narration": "audio",
      "board_size": 5,
      "layout": ("hero", "audio", "board", "gallery", "motion", "digest", "nav")},
 ]
@@ -412,6 +425,16 @@ def current_voice() -> str:
     return _theme(_tehran_now())["voice"]
 
 
+def current_narration_kind() -> str:
+    """Whether this slot narrates as a voice bubble or an audio attachment.
+
+    Exposed for the same reason as `theme_index`: the upload has to know the kind
+    BEFORE the payload is built, because a voice note needs an OGG/Opus transcode
+    and a different send method.
+    """
+    return _theme(_tehran_now()).get("narration", "audio")
+
+
 def section_counts(stories: list[Story]) -> list[tuple[str, int]]:
     """Section label -> story count, in the bulletin's own section order.
 
@@ -442,7 +465,8 @@ def cover_meta(stories: list[Story]) -> dict:
 
 # ── the bulletin ─────────────────────────────────────────────────────────
 def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
-          cover_id: str = "", motion_id: str = "") -> dict:
+          cover_id: str = "", motion_id: str = "",
+          narration_kind: str = "audio") -> dict:
     now = _tehran_now()
     clock = f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS)
     th = _theme(now)
@@ -488,10 +512,16 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
     # Narrated edition: the single strongest answer to "فقط متنه" — a bulletin
     # you can listen to. Optional by design; if TTS or the upload failed,
     # `narration_id` is "" and the bulletin ships unchanged.
+    #
+    # Which BLOCK carries it is part of the theme, because an attachment row and
+    # a voice bubble are two different reading experiences and using only one
+    # forever is the monotony this whole rotation exists to break.
     if narration_id:
-        seg["audio"] = [audio(narration_id, caption={"text": [
-            bold("🎧 روایت صوتی این بولتن"), "  ·  ",
-            italic("خوانده‌شده به فارسی")]})]
+        as_voice = narration_kind == "voice_note"
+        maker = voice_note if as_voice else audio
+        label = "🎙 روایت صوتی این بولتن" if as_voice else "🎧 روایت صوتی این بولتن"
+        seg["audio"] = [maker(narration_id, caption={"text": [
+            bold(label), "  ·  ", italic("خوانده‌شده به فارسی")]})]
 
     # The animated chart: the only MOVING element in the post, and the only one
     # that shows the bulletin's composition at a glance instead of describing it.

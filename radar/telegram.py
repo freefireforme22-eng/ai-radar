@@ -81,6 +81,7 @@ def _upload(path: str, field: str, filename: str, mime: str,
     # the two-way version silently sent a GIF to `sendPhoto` ("there is no photo
     # in the request") the moment a third media kind was added.
     method = {"audio": "sendAudio",
+              "voice": "sendVoice",
               "animation": "sendAnimation",
               "photo": "sendPhoto"}[field]
     url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{method}"
@@ -162,6 +163,24 @@ def upload_animation(path: str, chat_id: str | int | None = None) -> str:
         delete(result["message_id"], chat_id or config.CHANNEL_ID)
     except Exception:
         pass          # the id is what matters; a stray carrier is not fatal
+    return file_id
+
+
+def upload_voice(path: str, chat_id: str | int | None = None) -> str:
+    """Upload an OGG/Opus and return its `voice` file_id.
+
+    `sendVoice` demands Opus in an OGG container — an mp3 renamed to .ogg is
+    rejected — so `audio.to_voice()` transcodes first. The stored block came back
+    as `{"type": "voice_note", "voice_note": {..., "mime_type": "audio/ogg"}}`,
+    and a `caption` on it SURVIVES (probed on message 5270), contradicting the
+    older note in audio.py that said captions only work on `audio`.
+    """
+    result = _upload(path, "voice", "narration.ogg", "audio/ogg", chat_id)
+    file_id = (result.get("voice") or {}).get("file_id", "")
+    try:
+        delete(result["message_id"], chat_id or config.CHANNEL_ID)
+    except Exception:
+        pass
     return file_id
 
 
