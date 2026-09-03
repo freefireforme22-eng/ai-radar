@@ -419,43 +419,93 @@ def is_ai_related(story: Story) -> bool:
     return False
 
 
+_ENTITY_STOP = _STOP | {
+    "ai", "the", "new", "how", "why", "what", "with", "for", "and", "its",
+    "this", "that", "your", "our", "says", "said", "first", "now", "here",
+}
+
+
+def _entities(title: str) -> set[str]:
+    """Proper nouns and figures — the tokens that say WHICH event this is.
+
+    Keyword overlap alone cannot see that two headlines are the same story when
+    the outlets share almost no vocabulary. Measured on a live 8h pool: the
+    Nvidia/Hugging Face acquisition arrived four times —
+
+        "Nvidia confirms $12.9B acquisition of AI hosting platform Hugging Face"
+        "Nvidia acquires Hugging Face for $12.93 billion — company gains ..."
+        "With Hugging Face Acquisition, Nvidia Scores Big Win in AI Race"
+        "Nvidia buys Hugging Face, the GitHub of AI, for $13 billion"
+
+    — with a top pairwise Jaccard of 0.33, comfortably under the 0.42 threshold,
+    so THREE of them shipped in the same bulletin. What they do share is the
+    names: nvidia, hugging, face. Capitalised words and anything containing a
+    digit are kept; sentence-initial capitals are harmless because they still
+    have to survive the stop list and be matched by another headline.
+    """
+    out: set[str] = set()
+    for word in re.findall(r"[A-Za-z0-9$.\u2011-]+", title):
+        core = word.strip(".,;:!?()[]\"'\u2019")
+        if not core:
+            continue
+        low = core.lower().replace("\u2011", "-")
+        if len(low) < 2 or low in _ENTITY_STOP:
+            continue
+        if any(ch.isdigit() for ch in core) or core[0].isupper():
+            out.add(low)
+    return out
+
+
 def dedupe_similar(stories: list[Story], threshold: float = 0.42) -> list[Story]:
     """Collapse the same event reported by several outlets.
 
     URL fingerprints miss this entirely: a Gemini launch shows up from Google's
-    own blog, TechCrunch and The Verge with three different URLs. Two signals
-    are used together because either alone leaks duplicates:
+    own blog, TechCrunch and The Verge with three different URLs. Three signals
+    are used together because each alone leaks duplicates:
 
       * Jaccard overlap on title keywords (catches reworded headlines);
       * containment — when the shorter headline's keywords are ~fully inside the
         longer one, e.g. "Trump Administration Sides With OpenAI in New York
         Times Copyright Lawsuit" vs "The Trump administration is supporting
-        OpenAI in the NYT copyright lawsuit" (Jaccard only 0.50).
+        OpenAI in the NYT copyright lawsuit" (Jaccard only 0.50);
+      * shared ENTITIES plus a weak keyword overlap — see `_entities`. This is
+        the signal that catches wire-story retellings, where outlets agree on
+        the names and numbers and on nothing else.
+
+    The entity rule is deliberately aggressive: on a vendor blog publishing a
+    series ("... using Amazon Bedrock AgentCore", "Migrate agentic workloads to
+    Amazon Bedrock AgentCore") it merges genuinely distinct tutorials. That is
+    an acceptable trade — MAX_PER_FAMILY already caps how many items one source
+    can contribute, so the cost is a story that would have been dropped anyway,
+    while the benefit is never printing one event three times.
 
     The lowest-tier (most primary) source wins, so the vendor announcement is
     what gets published and the aggregators are credited instead.
     """
-    kept: list[tuple[set[str], Story]] = []
+    kept: list[tuple[set[str], set[str], Story]] = []
     for s in sorted(stories, key=lambda x: (x.tier, -x.published.timestamp())):
         sig = _shingle(s.title_en)
         if not sig:
             continue
+        ents = _entities(s.title_en)
         duplicate = False
-        for other_sig, other in kept:
+        for other_sig, other_ents, other in kept:
             union = sig | other_sig
             if not union:
                 continue
             overlap = len(sig & other_sig)
             jaccard = overlap / len(union)
             containment = overlap / min(len(sig), len(other_sig))
-            if jaccard >= threshold or (containment >= 0.7 and overlap >= 3):
+            same_names = len(ents & other_ents) >= 2 and jaccard >= 0.15
+            if jaccard >= threshold or (containment >= 0.7 and overlap >= 3) \
+                    or same_names:
                 if other.source != s.source and s.source not in other.also_seen_in:
                     other.also_seen_in.append(s.source)
                 duplicate = True
                 break
         if not duplicate:
-            kept.append((sig, s))
-    return [s for _, s in kept]
+            kept.append((sig, ents, s))
+    return [s for _, _, s in kept]
 
 
 def collect(lookback_hours: int | None = None) -> list[Story]:

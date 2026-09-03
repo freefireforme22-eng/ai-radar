@@ -112,6 +112,28 @@ def json_call(prompt: str, model: str | None = None, **kw) -> dict | list:
 
 # ── quality gate ──────────────────────────────────────────────────────────
 
+# Letters Persian orthography never doubles at the START of a word. A word that
+# begins with two of these is a garbled token, not vocabulary: live post payload
+# shipped «ططمیع یک میلیارد دلاری» as a headline, which passed every existing gate
+# (it is fully Persian script, so the ratio is 1.00, and it contains no Latin).
+# Checked against a corpus of 2,746 unique Persian words taken from verified live
+# channel posts and dry-run payloads: exactly ONE word matches, and it is that
+# defect. Words like ممکن / ببرند / ممیزی start with a doubled م or ب and must
+# stay legal, so the set deliberately excludes م and ب.
+_NEVER_INITIAL_DOUBLE = set("طظضصغعخحذثژچگپكقفسشزرد")
+_ZWNJ = "\u200c"
+
+
+def _garbled(text: str) -> list[str]:
+    """Persian-script words that no Persian word can be."""
+    out: list[str] = []
+    for word in re.findall(r"[\u0600-\u06FF\u200c]{2,}", text):
+        bare = word.replace(_ZWNJ, "")
+        if len(bare) >= 3 and bare[0] == bare[1] and bare[0] in _NEVER_INITIAL_DOUBLE:
+            out.append(word)
+    return out
+
+
 def audit(text: str, *, min_persian_ratio: float = 0.55,
           max_latin_words: int = 6) -> tuple[bool, str]:
     """Return (ok, reason). Rejects text that is not really Persian.
@@ -123,9 +145,17 @@ def audit(text: str, *, min_persian_ratio: float = 0.55,
     Residue is checked before the ratio so the failure reason names the actual
     offending words; a bare "persian ratio 0.23" tells you nothing about which
     phrase leaked through.
+
+    Garbled Persian is checked first of all, because it is invisible to both of
+    the other tests: a mangled word is still Persian script, so the ratio reads
+    1.00 and there is no Latin residue to find.
     """
     if not text or not text.strip():
         return False, "empty"
+
+    garbled = _garbled(text)
+    if garbled:
+        return False, f"garbled Persian: {garbled[:5]}"
 
     allowed = {w.lower() for w in config.KEEP_LATIN}
     residue: list[str] = []

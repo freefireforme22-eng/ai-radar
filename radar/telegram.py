@@ -77,7 +77,12 @@ def _upload(path: str, field: str, filename: str, mime: str,
              f"Content-Type: {mime}\r\n\r\n").encode("utf-8")
     body += blob + f"\r\n--{boundary}--\r\n".encode("utf-8")
 
-    method = "sendAudio" if field == "audio" else "sendPhoto"
+    # The send method follows the FIELD name — a lookup, not an if/else, because
+    # the two-way version silently sent a GIF to `sendPhoto` ("there is no photo
+    # in the request") the moment a third media kind was added.
+    method = {"audio": "sendAudio",
+              "animation": "sendAnimation",
+              "photo": "sendPhoto"}[field]
     url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{method}"
     req = urllib.request.Request(
         url, data=body,
@@ -132,6 +137,27 @@ def upload_audio(path: str, chat_id: str | int | None = None,
     result = _upload(path, "audio", "narration.mp3", "audio/mpeg",
                      chat_id, title=title)
     file_id = (result.get("audio") or {}).get("file_id", "")
+    try:
+        delete(result["message_id"], chat_id or config.CHANNEL_ID)
+    except Exception:
+        pass          # the id is what matters; a stray carrier is not fatal
+    return file_id
+
+
+def upload_animation(path: str, chat_id: str | int | None = None) -> str:
+    """Upload the loop and return its `animation` file_id.
+
+    MP4 in, MP4 out at full resolution. A GIF would also be accepted and
+    transcoded, but Telegram downscales GIFs to 320px wide (measured), so
+    `motion.py` encodes h264 first and this only forwards the file. Same
+    carrier-and-delete trick as the audio and cover uploads, because rich
+    messages have no upload endpoint of their own.
+    """
+    gif = path.endswith(".gif")
+    result = _upload(path, "animation",
+                     "chart.gif" if gif else "chart.mp4",
+                     "image/gif" if gif else "video/mp4", chat_id)
+    file_id = (result.get("animation") or {}).get("file_id", "")
     try:
         delete(result["message_id"], chat_id or config.CHANNEL_ID)
     except Exception:

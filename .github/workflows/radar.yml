@@ -52,6 +52,15 @@ jobs:
       - name: Install cover-card dependencies
         run: pip install --quiet Pillow==12.3.0 arabic-reshaper==3.0.1 python-bidi==0.6.11
 
+      # The animated chart is the only MOVING element. It must be uploaded as
+      # h264 MP4, because Telegram downscales uploaded GIFs to 320px wide and
+      # Persian labels are unreadable at that size (measured both ways). Neither
+      # this runner nor the server has a system ffmpeg, so the encoder comes from
+      # this wheel's bundled static binary. Optional like the cover: no wheel
+      # means a GIF fallback, and a failure means a bulletin with no chart.
+      - name: Install animation encoder
+        run: pip install --quiet imageio-ffmpeg==0.5.1
+
       - name: Publish bulletin
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}

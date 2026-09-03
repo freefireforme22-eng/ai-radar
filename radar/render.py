@@ -156,6 +156,25 @@ def hard_quote(blocks, credit=None):
     return block
 
 
+def animation(file_id, caption=None, autoplay=True):
+    """An animation block — the only block that MOVES.
+
+    `media` takes a `file_id` exactly like `photo`/`audio`, so the loop needs no
+    public hosting (see telegram.upload_animation). The server adds
+    `need_autoplay: true` on the stored block, so the loop plays by itself.
+
+    Nearly missed: a probe placed this block after a hand-written heading and got
+    `can't parse InputRichBlock: Can't find field "size"` — which is the HEADING's
+    required field, not the animation's. Telegram names a missing field without
+    saying which block owns it, so an invalid block earlier in the array makes a
+    valid later block look unsupported.
+    """
+    block = {"type": "animation", "animation": {"type": "animation", "media": file_id}}
+    if caption:
+        block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
+    return block
+
+
 def collage(urls, caption=None):
     block = {"type": "collage", "blocks": [
         {"type": "photo", "photo": {"type": "photo", "media": u}} for u in urls]}
@@ -306,27 +325,33 @@ _THEMES = [
     {"mark": "🛰", "accent": "primary", "digest": "pullquote",
      "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage",
      "voice": "fa-IR-DilaraNeural",
-     "board_size": 5, "layout": ("hero", "digest", "audio", "nav", "board", "gallery")},
+     "board_size": 5,
+     "layout": ("hero", "digest", "audio", "motion", "nav", "board", "gallery")},
     {"mark": "🌐", "accent": "success", "digest": "blockquote",
      "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow",
      "voice": "fa-IR-FaridNeural",
-     "board_size": 4, "layout": ("digest", "hero", "board", "audio", "nav", "gallery")},
+     "board_size": 4,
+     "layout": ("digest", "hero", "board", "motion", "audio", "nav", "gallery")},
     {"mark": "🧭", "accent": "danger", "digest": "expandable",
      "rule": "━━━━━", "glance": "📌", "gallery": "collage",
      "voice": "fa-IR-FaridNeural",
-     "board_size": 5, "layout": ("hero", "board", "digest", "gallery", "audio", "nav")},
+     "board_size": 5,
+     "layout": ("hero", "board", "digest", "gallery", "audio", "motion", "nav")},
     {"mark": "🔭", "accent": "link", "digest": "pullquote",
      "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow",
      "voice": "fa-IR-DilaraNeural",
-     "board_size": 3, "layout": ("audio", "hero", "digest", "board", "gallery", "nav")},
+     "board_size": 3,
+     "layout": ("audio", "hero", "motion", "digest", "board", "gallery", "nav")},
     {"mark": "📡", "accent": "success", "digest": "expandable",
      "rule": "⋄ ⋄ ⋄ ⋄", "glance": "🔎", "gallery": "collage",
      "voice": "fa-IR-DilaraNeural",
-     "board_size": 4, "layout": ("board", "hero", "digest", "audio", "gallery", "nav")},
+     "board_size": 4,
+     "layout": ("motion", "board", "hero", "digest", "audio", "gallery", "nav")},
     {"mark": "🛠", "accent": "primary", "digest": "blockquote",
      "rule": "═════", "glance": "🧩", "gallery": "slideshow",
      "voice": "fa-IR-FaridNeural",
-     "board_size": 5, "layout": ("hero", "audio", "board", "gallery", "digest", "nav")},
+     "board_size": 5,
+     "layout": ("hero", "audio", "board", "gallery", "motion", "digest", "nav")},
 ]
 
 # Section accents. The heading sizes genuinely differ (they were all 3 before,
@@ -387,6 +412,18 @@ def current_voice() -> str:
     return _theme(_tehran_now())["voice"]
 
 
+def section_counts(stories: list[Story]) -> list[tuple[str, int]]:
+    """Section label -> story count, in the bulletin's own section order.
+
+    Lives here (not in `run`) so the animated chart counts exactly what the text
+    bulletin shows, and so an empty section never becomes a zero-length bar.
+    """
+    tally: dict[str, int] = {}
+    for s in stories:
+        tally[s.section] = tally.get(s.section, 0) + 1
+    return [(label, tally[key]) for key, label in config.SECTIONS if tally.get(key)]
+
+
 def cover_meta(stories: list[Story]) -> dict:
     """Everything the cover card needs, computed from the same clock as `build`.
 
@@ -405,7 +442,7 @@ def cover_meta(stories: list[Story]) -> dict:
 
 # ── the bulletin ─────────────────────────────────────────────────────────
 def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
-          cover_id: str = "") -> dict:
+          cover_id: str = "", motion_id: str = "") -> dict:
     now = _tehran_now()
     clock = f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS)
     th = _theme(now)
@@ -456,10 +493,28 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
             bold("🎧 روایت صوتی این بولتن"), "  ·  ",
             italic("خوانده‌شده به فارسی")]})]
 
+    # The animated chart: the only MOVING element in the post, and the only one
+    # that shows the bulletin's composition at a glance instead of describing it.
+    # Optional like the cover and the narration.
+    if motion_id:
+        seg["motion"] = [animation(motion_id, caption={"text": [
+            bold("سهم هر بخش از این بولتن"), "  ·  ",
+            italic("نمودار متحرک")]})]
+
     seg["nav"] = [buttons([
         ("📡 کانال رادار", "https://t.me/ai_newsBY", th["accent"]),
         ("🔗 منبع خبر اول", stories[0].url if stories else "https://t.me/ai_newsBY", "link"),
     ])]
+
+    # Coverage checklist, promoted to the top of the post. It used to live inside
+    # the collapsed «منابع این بولتن» toggle at the very bottom, where verified
+    # live posts show it was shipping but effectively invisible — the same mistake
+    # as burying photos in a closed toggle. It answers a question the headline
+    # board cannot: an EMPTY section leaves no trace up there, so the ticks are
+    # the only place a reader learns this slot had no policy news.
+    covered = {s.section for s in stories}
+    coverage = [(label, key in covered) for key, label in config.SECTIONS]
+    cov_blocks = [heading("🗂 پوشش این بولتن", size=3), checklist(coverage)]
 
     # Headline board: titles, not a bare list. Each entry is its own heading with
     # a jump link into the full item, so the post is navigable from the top.
@@ -474,6 +529,7 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
         line += [italic(s.source_fa), "  ·  ",
                  anchor_link("خواندن ↓", f"s{i}")]
         board.append(para(line))
+    board += cov_blocks
     seg["board"] = board
 
     # Mid-message gallery: a second band of visible art, drawn from stories that
@@ -538,13 +594,10 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
 
     blocks.append(divider())
     blocks.append(details([bold("🗂 منابع این بولتن"), "  ",
-                           italic("و پوشش دسته‌ها")], [
+                           italic("شمار خبر هر منبع")], [
         table([["منبع", "خبر"]] + [[src, f"{n}".translate(_DIGITS)]
                                    for src, n in _source_counts(stories)],
               caption=italic("شماره خبرها بر پایه رتبه در همین بولتن")),
-        para([bold("رصد این دوره: "), italic("چه دسته‌هایی خبر تازه داشتند")]),
-        checklist([(label, bool(by_section.get(key)))
-                   for key, label in config.SECTIONS]),
         para([italic("همه منابع سرچشمه اصلی‌اند؛ رادار بازنشر نمی‌کند."), "  ",
               anchor_link("بازگشت به بالا ↑", "top")]),
     ]))

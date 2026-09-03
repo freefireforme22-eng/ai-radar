@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radar import config, llm, render, sources  # noqa: E402
+from radar import card, config, llm, motion, render, sources  # noqa: E402
 from radar.sources import Story  # noqa: E402
 
 
@@ -1096,7 +1096,7 @@ def test_every_theme_layout_places_every_segment_exactly_once():
     image from that slot's bulletin — one post in six missing its audio, which
     is exactly the kind of silent loss that shipped photos into a collapsed
     toggle for weeks."""
-    expected = {"hero", "digest", "audio", "nav", "board", "gallery"}
+    expected = {"hero", "digest", "audio", "motion", "nav", "board", "gallery"}
     for th in render._THEMES:
         assert set(th["layout"]) == expected, f"{th['mark']} layout {th['layout']}"
         assert len(th["layout"]) == len(expected), f"{th['mark']} repeats a segment"
@@ -1630,3 +1630,130 @@ def test_digit_prefixed_units_stay_ascii():
     assert "۹۴.۲" in _fa_digits("دقت 94.2 درصد")
     # and version suffixes keep working
     assert "GPT-5.2" in _fa_digits("مدل GPT-5.2 منتشر شد")
+
+
+def test_animated_chart_counts_match_the_bulletin():
+    """The moving chart must count exactly what the text sections contain — a
+    chart that disagrees with the post below it is worse than no chart."""
+    stories = [
+        _story_ready("models"), _story_ready("models"),
+        _story_ready("business"), _story_ready("tools"),
+    ]
+    rows = render.section_counts(stories)
+    assert sum(n for _, n in rows) == len(stories)
+    assert [n for _, n in rows] == [2, 1, 1], rows
+    # empty sections must not appear as zero-length bars
+    assert all(n > 0 for _, n in rows)
+    labels = dict(config.SECTIONS)
+    assert [lbl for lbl, _ in rows] == [labels["models"], labels["business"],
+                                        labels["tools"]]
+
+
+def test_animation_block_rides_a_file_id_and_every_theme_places_it():
+    """`animation` is the only block that moves; it takes a file_id like photo
+    and audio, so no public hosting is needed. Every theme must give it a slot,
+    otherwise a theme would silently drop the chart it just rendered."""
+    block = render.animation("FILEID123", caption="نمودار")
+    assert block["type"] == "animation"
+    assert block["animation"] == {"type": "animation", "media": "FILEID123"}
+    assert block["caption"] == {"text": "نمودار"}
+    for th in render._THEMES:
+        assert "motion" in th["layout"], th["mark"]
+
+    payload = render.build([_story_ready()], "خلاصه", "AUDIOID", "COVERID", "MOTIONID")
+    kinds = [b["type"] for b in payload["blocks"]]
+    assert "animation" in kinds, kinds
+    # and it must be absent when no chart was produced
+    plain = render.build([_story_ready()], "خلاصه", "AUDIOID", "COVERID", "")
+    assert "animation" not in [b["type"] for b in plain["blocks"]]
+
+
+def test_motion_loop_is_a_full_size_mp4_with_moving_frames():
+    """Three things this must never regress:
+    1. it MOVES (frames differ — otherwise it is a still image with extra bytes),
+    2. it is an MP4, because Telegram downscales uploaded GIFs to 320px wide and
+       Persian labels at that size are unreadable,
+    3. it keeps the authored 720x420, verified by decoding the file itself."""
+    if not card.available():
+        import pytest
+        pytest.skip("Pillow/fonts unavailable")
+    path = motion.build(theme_index=0, rows=[("الف", 3), ("ب", 1)],
+                        out_path="/tmp/test_motion.mp4")
+    assert path, "no loop produced"
+    assert path.endswith(".mp4"), f"fell back to {path} — GIF gets downscaled"
+
+    import subprocess as sp
+    import imageio_ffmpeg
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    probe = sp.run([exe, "-hide_banner", "-i", path], capture_output=True, text=True)
+    assert "720x420" in probe.stderr, probe.stderr[-400:]
+
+    # decode two distant frames as raw grayscale and compare
+    def frame(n):
+        out = sp.run([exe, "-loglevel", "error", "-i", path, "-vf",
+                      f"select=eq(n\\,{n})", "-vframes", "1", "-f", "rawvideo",
+                      "-pix_fmt", "gray", "-"], capture_output=True)
+        return sum(out.stdout)
+    assert frame(0) != frame(12), "frames identical — not an animation"
+
+
+def test_coverage_checklist_ticks_only_sections_with_stories():
+    """The checklist carries real information: an EMPTY section is invisible in
+    the headline board, so this is the only place a reader learns the slot had no
+    policy news. Ticked must mean "covered" — never decoration. It must also be
+    ONE checklist near the headlines, not a second copy buried in the closed
+    sources toggle at the bottom (where the original was effectively unseen)."""
+    stories = [_story_ready("models"), _story_ready("tools")]
+    payload = render.build(stories, "خلاصه")
+    lists = [b for b in payload["blocks"] if b["type"] == "list"
+             and any(i.get("has_checkbox") for i in b["items"])]
+    assert len(lists) == 1, "expected exactly one checklist"
+    items = lists[0]["items"]
+    assert len(items) == len(config.SECTIONS)
+    checked = {i["blocks"][0]["text"] for i in items if i.get("is_checked")}
+    unchecked = {i["blocks"][0]["text"] for i in items if not i.get("is_checked")}
+    labels = dict(config.SECTIONS)
+    assert labels["models"] in checked and labels["tools"] in checked
+    assert labels["policy"] in unchecked, unchecked
+    assert all(i.get("has_checkbox") for i in items)
+
+
+def test_entity_dedupe_collapses_a_wire_story_retold_by_four_outlets():
+    """Live 8h pool, verbatim headlines: the same acquisition arrived four times
+    with a top pairwise Jaccard of 0.33 — under the 0.42 keyword threshold — and
+    three copies shipped in one bulletin. Shared entity names are what identify
+    the event."""
+    titles = [
+        "Nvidia confirms $12.9B acquisition of AI hosting platform Hugging Face",
+        "Nvidia acquires Hugging Face for $12.93 billion — company gains control",
+        "With Hugging Face Acquisition, Nvidia Scores Big Win in AI Race",
+        "Nvidia buys Hugging Face, the GitHub of AI, for $13 billion",
+    ]
+    pool = [mk(t, f"Outlet{i}", tier=i + 1) for i, t in enumerate(titles)]
+    out = sources.dedupe_similar(pool)
+    assert len(out) == 1, [s.title_en for s in out]
+    assert len(out[0].also_seen_in) == 3, out[0].also_seen_in
+
+    # and it must NOT collapse two unrelated stories that merely share one name
+    a = mk("Nvidia launches free GPU clustering utility", "A")
+    b = mk("Nvidia RTX Spark N1X launches in October", "B")
+    assert len(sources.dedupe_similar([a, b])) == 2
+
+
+def test_garbled_persian_is_rejected_even_though_it_is_all_persian():
+    """A mangled word is invisible to both existing gates: it is Persian script,
+    so the ratio reads 1.00, and it carries no Latin residue. A dry run shipped
+    «ططمیع یک میلیارد دلاری…» as a headline. Persian never doubles ط at the start
+    of a word."""
+    ok, why = llm.audit("ططمیع یک میلیارد دلاری OpenAI برای امنیت خدمات حیاتی")
+    assert not ok and "garbled" in why, why
+    ok, _ = llm.audit("تطمیع یک میلیارد دلاری OpenAI برای امنیت خدمات حیاتی")
+    assert ok
+
+    # Real Persian words DO start with doubled م / ب — those must stay legal, or
+    # the gate would reject correct translations.
+    for good in ("ممکن است این مدل ارزان‌تر باشد و هزینه را کاهش دهد",
+                 "ببرند این فناوری را به بازارهای تازه و رقابت را بیشتر کنند",
+                 "ممیزی امنیتی مدل تازه منتشر شد و نتایج آن عمومی است"):
+        ok, why = llm.audit(good)
+        assert ok, f"{good} -> {why}"
