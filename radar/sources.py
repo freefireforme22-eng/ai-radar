@@ -37,6 +37,13 @@ class Story:
     facts: list[str] = field(default_factory=list)
     also_seen_in: list[str] = field(default_factory=list)
     image: str = ""
+    # Analytical extras. `facts` used to be sentences lifted out of the article,
+    # which carried no information the summary did not already have; these
+    # fields exist so the model has somewhere to put inference instead.
+    impact_fa: str = ""        # what changes if this holds
+    metric_label: str = ""     # the one number that matters, labelled
+    metric_value: str = ""
+    latex: str = ""            # formula/benchmark expression, research items only
 
     @property
     def fingerprint(self) -> str:

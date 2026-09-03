@@ -1,27 +1,38 @@
 """Compose the Telegram Rich Message (Bot API 10.1+ `sendRichMessage`).
 
-Schema notes — all verified live against api.telegram.org, because several
-plausible names are rejected:
+The block vocabulary was taken from the official reference (core.telegram.org/
+bots/api, the `InputRichBlock*` family) rather than guessed, then each entry was
+re-probed live because the docs and the server disagree in places:
 
-    OK              REJECTED
-    heading         section_heading, sectionHeading, title, h1
-    pre             preformatted, code
-    blockquote      block_quotation, quotation
-    expandable_blockquote   expandableBlockQuotation
-    mathematical_expression math, latex, equation
-    voice_note      voiceNote
+    24 block types exist: paragraph heading footer divider details list table
+    photo video animation audio voice_note document pre blockquote
+    expandable_blockquote pullquote collage slideshow map anchor buttons
+    mathematical_expression thinking   (`thinking` is draft-only)
 
-`heading` additionally requires an integer `size` (1 largest … 6 smallest);
-omitting it fails with `Can't find field "size"`. `details` needs `summary`
-(not `title`), and list items wrap their content in `blocks`.
+    RichText entities: bold italic underline strikethrough spoiler code marked
+    subscript superscript url mention hashtag cashtag bot_command custom_emoji
+    anchor_link reference reference_link date_time mathematical_expression
 
-Nesting: `details` inside `details` renders as collapsible sub-sections, which
-is the structure this channel is built around. Checklists are list items with
-`has_checkbox`.
+Traps found by probing, each of which silently degrades the message:
+
+* Ordered lists key off ``item["type"]`` ("1", "a", "A", "i", "I") — NOT
+  ``label_type``. An unknown field is accepted and dropped, so a numbered list
+  sent with ``label_type`` renders as bullets. Verified by forwarding the sent
+  message back and reading ``label``: with ``type`` it is "1."/"c."/"iii.",
+  with ``label_type`` it is "•".
+* There is no colour, theme or font control. ``color``, ``accent_color_id``,
+  ``theme``, ``style`` and ``font*`` are all accepted and dropped. The only
+  real top-level fields are ``is_rtl`` and ``skip_entity_detection``. Colour
+  therefore comes from ``buttons`` (``style``: primary/success/danger/link) and
+  from custom emoji.
+* ``blockquote`` takes ``blocks``, while ``expandable_blockquote`` and
+  ``pullquote`` take ``text``. Sending ``text`` to ``blockquote`` fails with
+  RICH_MESSAGE_EMPTY.
+* ``skip_entity_detection`` is the supported way to stop Telegram rewriting
+  "cs.AI" into a dead link; explicit ``url`` entities still work under it.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta, timezone
 
 from . import config
@@ -33,7 +44,21 @@ def italic(text):  return {"type": "italic", "text": text}
 def code(text):    return {"type": "code", "text": text}
 def marked(text):  return {"type": "marked", "text": text}
 def spoiler(text): return {"type": "spoiler", "text": text}
+def under(text):   return {"type": "underline", "text": text}
+def sup(text):     return {"type": "superscript", "text": text}
+def sub(text):     return {"type": "subscript", "text": text}
 def link(text, url): return {"type": "url", "text": text, "url": url}
+def inline_math(expr): return {"type": "mathematical_expression", "expression": expr}
+
+
+def anchor_link(text, name=""):
+    """Jump to an ``anchor`` block. Empty name jumps back to the top."""
+    return {"type": "anchor_link", "text": text, "anchor_name": name}
+
+
+# `reference` / `reference_link` are documented but the server rejects them:
+# 'type "reference" is unsupported'. Deliberately not wrapped here so nobody
+# reaches for them and breaks a bulletin.
 
 
 # ── block helpers ────────────────────────────────────────────────────────
@@ -80,15 +105,75 @@ def checklist(items):
     ]}
 
 
-def numbered(items):
+def numbered(items, kind="1", start=1):
+    """A real ordered list.
+
+    ``kind`` maps to the documented ``type`` values: "1" decimal, "a"/"A"
+    letters, "i"/"I" Roman numerals. Passing it as ``label_type`` (an earlier
+    mistake here) is silently ignored and yields bullets.
+    """
     return {"type": "list", "items": [
-        {"blocks": [para(text)], "value": i, "label_type": "1"}
-        for i, text in enumerate(items, 1)
+        {"blocks": [para(t)], "type": kind, "value": i}
+        for i, t in enumerate(items, start)
     ]}
 
 
 def bullets(items):
     return {"type": "list", "items": [{"blocks": [para(t)]} for t in items]}
+
+
+def anchor(name):
+    return {"type": "anchor", "name": name}
+
+
+def buttons(specs, align="center"):
+    """A row of 1-8 coloured buttons.
+
+    ``style`` is the only real colour control in the whole API: "primary"
+    (blue), "success" (green), "danger" (red) or "link" (plain — note the
+    server drops the field in that case, confirmed by round-trip).
+    """
+    return {"type": "buttons", "align": align, "buttons": [
+        {"text": text, "url": url, **({"style": style} if style else {})}
+        for text, url, style in specs
+    ]}
+
+
+def pullquote(text, credit=None):
+    """Centred aside — visually distinct from both quote styles."""
+    block = {"type": "pullquote", "text": text}
+    if credit:
+        block["credit"] = credit
+    return block
+
+
+def hard_quote(blocks, credit=None):
+    """Non-expandable blockquote. Takes ``blocks``, unlike the other two."""
+    block = {"type": "blockquote", "blocks": blocks}
+    if credit:
+        block["credit"] = credit
+    return block
+
+
+def collage(urls, caption=None):
+    block = {"type": "collage", "blocks": [
+        {"type": "photo", "photo": {"type": "photo", "media": u}} for u in urls]}
+    if caption:
+        block["caption"] = {"text": caption}
+    return block
+
+
+def slideshow(urls, caption=None):
+    block = {"type": "slideshow", "blocks": [
+        {"type": "photo", "photo": {"type": "photo", "media": u}} for u in urls]}
+    if caption:
+        block["caption"] = {"text": caption}
+    return block
+
+
+def pre(text, language="text"):
+    return {"type": "pre", "text": text, "language": language}
+
 
 
 def quote(text, credit=None):
@@ -98,49 +183,22 @@ def quote(text, credit=None):
     return block
 
 
-# Telegram's server-side linkifier turns anything shaped like `host.tld` into a
-# clickable URL *after* the payload is accepted — the bot never sees it coming.
-# Live post #98 shipped a cell reading "arXiv cs.AI" that Telegram rewrote into
-# a link pointing at the literal string "cs.AI", i.e. a dead link on a feed
-# category name. Verified by probe: ".AI" is a real ccTLD (Anguilla) so it fires,
-# while "cs.LG" is left alone because .LG is not a TLD — which is why only one of
-# three arXiv rows looked broken and the bug survived earlier review.
+# Telegram's server-side linkifier rewrites anything shaped like `host.tld` into
+# a clickable URL *after* the payload is accepted. Live post #98 shipped a cell
+# reading "arXiv cs.AI" that became a link pointing at the literal string
+# "cs.AI" — a dead link on a feed category name (".AI" is Anguilla's ccTLD, so
+# it fires; "cs.LG" is left alone because .LG is not a TLD, which is why only
+# one of three arXiv rows looked broken and the bug survived review).
 #
-# U+2060 WORD JOINER breaks the hostname pattern while being zero-width and
-# non-breaking, so the text still reads "cs.AI" to a human. Probed alternatives:
-# ZWNJ (U+200C) also works but is a *semantic* character in Persian typing and
-# has no business inside a Latin token; a plain space changes the text.
-_WORD_JOINER = "\u2060"
-_LOOKS_LIKE_HOST = re.compile(r"(?<=[A-Za-z0-9])\.(?=[A-Za-z]{2,24}\b)")
+# The documented cure is the top-level `skip_entity_detection` flag, set in
+# `build`. Probed live: with it, the stored message carries zero `url` entities
+# for "cs.AI و openai.com", while an explicit `url` element still works — so
+# real links keep working and accidental ones stop appearing. This replaces an
+# earlier U+2060 WORD JOINER hack that polluted the text with invisible
+# characters to defeat the pattern.
 
 
-def no_autolink(value):
-    """Neutralise accidental host-shaped runs anywhere in a payload subtree.
-
-    Recurses through every container the schema uses (``blocks``, ``items``,
-    ``cells``, ``summary``, ``caption`` …) so one call at the end of ``build``
-    covers the whole bulletin. A deliberate ``url`` element is returned
-    untouched: its label is allowed to read like a hostname.
-    """
-    if isinstance(value, str):
-        return _LOOKS_LIKE_HOST.sub("." + _WORD_JOINER, value)
-    if isinstance(value, list):
-        return [no_autolink(v) for v in value]
-    if isinstance(value, dict):
-        if value.get("type") == "url":
-            return value
-        return {k: (v if k in _RAW_KEYS else no_autolink(v)) for k, v in value.items()}
-    return value
-
-
-# Keys whose values are machine-read, not displayed prose.
-_RAW_KEYS = {"type", "url", "align", "valign", "label_type", "size", "value",
-             "is_open", "is_header", "is_bordered", "is_striped", "is_compact",
-             "has_checkbox", "is_checked", "is_rtl", "label", "media", "photo",
-             "language", "has_spoiler"}
-
-
-def table(rows, *, header=True, caption=None):
+def table(rows, *, header=True, caption=None, striped=True, compact=True):
     cells = []
     for r, row in enumerate(rows):
         line = []
@@ -151,10 +209,11 @@ def table(rows, *, header=True, caption=None):
             line.append(cell)
         cells.append(line)
     block = {"type": "table", "cells": cells, "is_bordered": True,
-             "is_striped": True, "is_compact": True}
+             "is_striped": striped, "is_compact": compact}
     if caption:
         block["caption"] = caption
     return block
+
 
 
 # ── date line ────────────────────────────────────────────────────────────
@@ -193,46 +252,114 @@ def _tehran_now() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)
 
 
+# ── per-bulletin identity ────────────────────────────────────────────────
+# The complaint was that every post looked identical ("قالب پیامای الان همه‌شون
+# شبیه همه"). The API exposes no colour or font control, so identity has to come
+# from rotating the *structure*: which quote form carries the digest, which
+# button colour leads, which glyphs mark the sections. One theme per 6-hour slot
+# means four consecutive bulletins never look the same.
+_THEMES = [
+    {"mark": "🛰", "accent": "primary", "digest": "pullquote",
+     "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage"},
+    {"mark": "🌐", "accent": "success", "digest": "blockquote",
+     "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow"},
+    {"mark": "🧭", "accent": "danger", "digest": "expandable",
+     "rule": "━━━━━", "glance": "📌", "gallery": "collage"},
+    {"mark": "🔭", "accent": "link", "digest": "pullquote",
+     "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow"},
+]
+
+# Section accents: each section gets its own heading size and quote form so a
+# research item reads differently from a funding item even inside one bulletin.
+_SECTION_STYLE = {
+    "models":   {"size": 3, "quote": "expandable", "bullet": "i"},
+    "business": {"size": 3, "quote": "pullquote", "bullet": "1"},
+    "policy":   {"size": 3, "quote": "blockquote", "bullet": "a"},
+    "tools":    {"size": 3, "quote": "expandable", "bullet": "1"},
+}
+
+
+def _theme(now: datetime) -> dict:
+    return _THEMES[((now.timetuple().tm_yday * 4) + now.hour // 6) % len(_THEMES)]
+
+
 # ── the bulletin ─────────────────────────────────────────────────────────
 def build(stories: list[Story], summary_fa: str = "") -> dict:
     now = _tehran_now()
     clock = f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS)
+    th = _theme(now)
 
     blocks: list[dict] = [
-        heading("رادار هوش مصنوعی", size=1),
-        para([italic(f"{_jalali(now)} — ساعت {clock} به وقت تهران"),
-              "  •  ", code(f"{len(stories)}".translate(_DIGITS)), " خبر منتخب"]),
+        anchor("top"),
+        heading(f"{th['mark']} رادار هوش مصنوعی", size=1),
+        para([italic(f"{_jalali(now)} — ساعت {clock} به وقت تهران"), "  •  ",
+              code(f"{len(stories)}".translate(_DIGITS)), " خبر منتخب  •  ",
+              {"type": "hashtag", "text": "#رادار_هوش_مصنوعی"}]),
     ]
 
-    # Lead image: the best picture of the highest-scoring story, shown before the
-    # fold so the bulletin has a face in the channel feed instead of a wall of
-    # text. Telegram renders a `photo` block full-width at the top.
-    lead = next((s for s in stories if s.image), None)
+    # Photos have to sit at the TOP LEVEL to be seen: art buried inside a
+    # collapsed toggle is invisible until tapped, which is why the last bulletin
+    # read as "هیچ عکسی نیست" even though it shipped two photos.
+    with_art = [s for s in stories if s.image]
+    lead = with_art[0] if with_art else None
     if lead is not None:
         blocks.append(photo(lead.image, caption={"text": [
-            bold("تصویر شاخص: "), lead.title_fa]}))
+            bold("تصویر شاخص  ·  "), lead.title_fa]}))
 
     if summary_fa:
-        blocks.append(quote(summary_fa, credit="جمع‌بندی سردبیر"))
+        blocks.append(_digest_block(th["digest"], summary_fa))
 
-    blocks.append(_glance(stories))
+    blocks.append(buttons([
+        ("📡 کانال رادار", "https://t.me/ai_newsBY", th["accent"]),
+        ("🔗 منبع خبر اول", stories[0].url if stories else "https://t.me/ai_newsBY", "link"),
+    ]))
+
+    # Headline board: titles, not a bare list. Each entry is its own heading with
+    # a jump link into the full item, so the post is navigable from the top.
+    blocks.append(divider())
+    blocks.append(heading(f"{th['glance']} تیترهای این بولتن", size=2))
+    for i, s in enumerate(stories, 1):
+        blocks.append(heading([sup(f"{i}".translate(_DIGITS)), " ", s.title_fa], size=5))
+        line: list = []
+        if s.metric_label and s.metric_value:
+            line += [marked(f" {s.metric_label}: {s.metric_value} "), "  "]
+        line += [italic(s.source_fa), "  ·  ",
+                 anchor_link("خواندن ↓", f"s{i}")]
+        blocks.append(para(line))
+
+    # Mid-message gallery: a second band of visible art, drawn from stories that
+    # are NOT the lead so no picture is shown twice. `gallery` stays empty unless
+    # the band is actually rendered — otherwise a single spare image would be
+    # excluded from its own story toggle and vanish from the bulletin entirely.
+    gallery: list[str] = []
+    spare = [s.image for s in with_art[1:4]]
+    if len(spare) >= 2:
+        gallery = spare
+        blocks.append(para(italic(th["rule"])))
+        maker = collage if th["gallery"] == "collage" else slideshow
+        blocks.append(maker(gallery, caption="قاب‌های امروز"))
+
     blocks.append(divider())
 
-    # Top-level toggle per section, each holding one nested toggle per story.
+    # One toggle per section, one nested toggle per story.
     by_section: dict[str, list[Story]] = {}
     for s in stories:
         by_section.setdefault(s.section, []).append(s)
 
+    rank = {id(s): i for i, s in enumerate(stories, 1)}
     first = True
     for key, label in config.SECTIONS:
         group = by_section.get(key) or []
         if not group:
             continue
+        style = _SECTION_STYLE.get(key, _SECTION_STYLE["tools"])
         inner: list[dict] = []
-        for i, s in enumerate(group, 1):
+        for s in group:
+            i = rank[id(s)]
             inner.append(details(
                 [code(f"{i}".translate(_DIGITS)), " ", bold(s.title_fa)],
-                _story_blocks(s, with_image=s is not lead),
+                _story_blocks(s, i, style, with_image=s is not lead
+                              and s.image not in gallery),
             ))
         count = f"{len(group)}".translate(_DIGITS)
         blocks.append(details([bold(label), "  ", italic(f"({count} خبر)")],
@@ -240,66 +367,88 @@ def build(stories: list[Story], summary_fa: str = "") -> dict:
         first = False
 
     blocks.append(divider())
-    blocks.append(details(bold("🗂 فهرست منابع این بولتن"),
-                          [bullets(sorted({f"{s.source} — {s.source_fa}" for s in stories}))]))
+    blocks.append(details([bold("🗂 منابع این بولتن"), "  ",
+                           italic("و پوشش دسته‌ها")], [
+        table([["منبع", "خبر"]] + [[src, f"{n}".translate(_DIGITS)]
+                                   for src, n in _source_counts(stories)],
+              caption=italic("شماره خبرها بر پایه رتبه در همین بولتن")),
+        para([bold("رصد این دوره: "), italic("چه دسته‌هایی خبر تازه داشتند")]),
+        checklist([(label, bool(by_section.get(key)))
+                   for key, label in config.SECTIONS]),
+        para([italic("همه منابع سرچشمه اصلی‌اند؛ رادار بازنشر نمی‌کند."), "  ",
+              anchor_link("بازگشت به بالا ↑", "top")]),
+    ]))
 
     blocks.append(footer([
         "رادار هوش مصنوعی  •  ",
         link("@ai_newsBY", "https://t.me/ai_newsBY"),
         "  •  به‌روزرسانی هر ۶ ساعت",
     ]))
-    # Applied once over the finished tree: any host-shaped run that slipped in
-    # from a feed title, a category name or a benchmark label would otherwise be
-    # silently rewritten into a dead link by Telegram after delivery.
-    return {"blocks": no_autolink(blocks), "is_rtl": True}
+
+    # `skip_entity_detection` is what stops Telegram rewriting bare text into
+    # links after delivery. Probed both ways on the live API: without it, a
+    # paragraph reading "cs.AI و openai.com" comes back carrying two `url`
+    # entities whose href IS the literal text (dead links — this is the bug that
+    # shipped in post #98); with it, zero `url` entities are stored while an
+    # explicit `url` element still works. Cheaper and cleaner than the earlier
+    # U+2060 approach, which littered the text with invisible characters.
+    return {"blocks": blocks, "is_rtl": True, "skip_entity_detection": True}
 
 
-def _glance(stories: list[Story]) -> dict:
-    """A one-line-per-story index, so the reader can decide what to open.
-
-    Typography carries the hierarchy here, since the API has no font field:
-    ``superscript`` for the rank, ``bold`` for the headline, ``code`` for the
-    score. Probed live — ``subscript``/``superscript``/``marked``/``underline``
-    are all accepted as rich-text entities, while ``small``, ``big`` and
-    ``highlight`` are rejected.
-    """
-    rows = []
-    for i, s in enumerate(stories, 1):
-        rows.append([{"type": "superscript", "text": f"{i}".translate(_DIGITS)},
-                     " ", bold(s.title_fa), " ",
-                     {"type": "marked", "text": f" {s.score:.0f}".translate(_DIGITS) + "/۱۰ "}])
-    return details([bold("⚡️ یک نگاه سریع"), "  ", italic("(فهرست تیترها)")],
-                   [numbered_rich(rows)], is_open=True)
+def _digest_block(kind: str, text: str, credit: str = "جمع‌بندی سردبیر") -> dict:
+    if kind == "pullquote":
+        return pullquote(text, credit=credit)
+    if kind == "blockquote":
+        return hard_quote([para(text)], credit=credit)
+    return quote(text, credit=credit)
 
 
-def numbered_rich(rows) -> dict:
-    """Numbered list whose items carry rich text rather than a plain string."""
-    return {"type": "list", "items": [
-        {"blocks": [para(r)], "value": i, "label_type": "1"}
-        for i, r in enumerate(rows, 1)
-    ]}
+def _source_counts(stories: list[Story]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for s in stories:
+        counts[f"{s.source_fa} ({s.source})"] = counts.get(f"{s.source_fa} ({s.source})", 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def _story_blocks(s: Story, with_image: bool = True) -> list[dict]:
-    out: list[dict] = [para(s.summary_fa)]
-    # Article art goes right after the lede, inside the story's own toggle, so a
-    # bulletin of nine stories stays a compact wall of headlines until opened —
-    # then each one unfolds with its own picture. The story already used as the
-    # lead image skips it so the same photo never appears twice.
+def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True) -> list[dict]:
+    out: list[dict] = [anchor(f"s{rank}"), para(s.summary_fa)]
+
     if s.image and with_image:
-        out.append(photo(s.image, caption={"text": [
-            italic("تصویر: "), s.source_fa]}))
+        out.append(photo(s.image, caption={"text": [italic("تصویر: "), s.source_fa]}))
+
+    # The headline number, given the weight of a heading rather than hidden in a
+    # table cell.
+    if s.metric_label and s.metric_value:
+        out.append(heading([s.metric_label, ": ", marked(f" {s.metric_value} ")], size=4))
+
     if s.why_fa:
-        out.append(quote(s.why_fa, credit="چرا مهم است"))
+        out.append(_digest_block(style["quote"], s.why_fa, credit="چرا مهم است"))
+    if s.impact_fa:
+        out.append(pullquote(s.impact_fa, credit="اگر درست باشد"))
+
+    if s.latex:
+        out.append(para(italic("رابطه کلیدی:")))
+        out.append(math(s.latex))
+
     if s.facts:
-        out.append(details(italic("نکات کلیدی"), [checklist([(f, True) for f in s.facts])]))
-    rows = [["منبع", "اهمیت", "زمان"],
-            [s.source, f"{s.score:.0f}".translate(_DIGITS) + "/۱۰",
-             _tehran_time_of(s.published)]]
-    out.append(table(rows, caption=italic("مشخصات خبر")))
+        out.append(details([bold("🔍 نکات کلیدی"), "  ",
+                            italic(f"({len(s.facts)} نکته)".translate(_DIGITS))],
+                           [numbered(s.facts, kind=style["bullet"])], is_open=True))
+
+    out.append(table([["منبع", "اهمیت", "زمان انتشار"],
+                      [s.source, f"{s.score:.0f}".translate(_DIGITS) + "/۱۰",
+                       _tehran_time_of(s.published)]],
+                     caption=italic("مشخصات خبر"), striped=False))
+
     if s.also_seen_in:
         out.append(para([italic("پوشش خبری دیگر: "), ", ".join(s.also_seen_in)]))
-    out.append(para(link("خواندن متن کامل در منبع ↗", s.url)))
+    # Buttons MUST carry a URL: probed live, a button with an empty url, with
+    # `anchor_name`, or with no url at all is rejected with "Text buttons are not
+    # allowed in the inline keyboard". Navigation therefore uses an anchor_link
+    # entity in a paragraph, not a button.
+    out.append(buttons([("خواندن متن کامل ↗", s.url, "primary"),
+                        ("کانال رادار", "https://t.me/ai_newsBY", "link")]))
+    out.append(para(anchor_link("بازگشت به تیترها ↑", "top")))
     return out
 
 

@@ -54,7 +54,8 @@ def plain_fallback(stories, summary_fa: str = "") -> str:
 
     Rich messages only render fully for Premium users; this keeps the channel
     readable everywhere and is also the emergency path if the rich payload is
-    rejected.
+    rejected. It mirrors the rich renderer's information — including the
+    analytical fields — so the fallback is not a downgrade in substance.
     """
     lines = ["<b>🛰 رادار هوش مصنوعی</b>", ""]
     if summary_fa:
@@ -70,8 +71,13 @@ def plain_fallback(stories, summary_fa: str = "") -> str:
         for s in group:
             lines.append(f"• <a href=\"{_esc(s.url)}\"><b>{_esc(s.title_fa)}</b></a>")
             lines.append(_esc(s.summary_fa))
-            if s.facts:
-                lines += [f"   ☑️ {_esc(f)}" for f in s.facts]
+            metric = getattr(s, "metric_label", ""), getattr(s, "metric_value", "")
+            if metric[0] and metric[1]:
+                lines.append(f"   <b>{_esc(metric[0])}:</b> <code>{_esc(metric[1])}</code>")
+            if getattr(s, "impact_fa", ""):
+                lines.append(f"   <i>اگر درست باشد: {_esc(s.impact_fa)}</i>")
+            for n, f in enumerate(s.facts, 1):
+                lines.append(f"   {n}. {_esc(f)}")
             lines.append(f"   <i>{_esc(s.source)}</i>")
             lines.append("")
     lines.append("<i>@ai_newsBY — هر ۶ ساعت</i>")

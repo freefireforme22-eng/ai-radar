@@ -113,6 +113,10 @@ def _story_ready(section="models"):
     s.facts = ["پنجره متنی بزرگ‌تر", "هزینه کمتر"]
     s.section = section
     s.score = 9
+    s.image = "https://img.example.com/lead.jpg"
+    s.impact_fa = "قیمت هر میلیون توکن برای توسعه‌دهندگان کوچک نصف می‌شود."
+    s.metric_label = "دقت در MMLU"
+    s.metric_value = "۹۴.۲٪"
     return s
 
 
@@ -127,12 +131,15 @@ def _walk(blocks):
 
 
 def test_payload_uses_only_server_accepted_types():
-    # Verified live against api.telegram.org — see render.py docstring.
+    # Verified live against api.telegram.org, one block per request so a single
+    # rejection cannot mask the rest. Rejected there: "map" without a nested
+    # `location`, "reference" (unsupported entirely), "date_time" keyed on
+    # anything but `unix_time`.
     accepted = {"paragraph", "heading", "pre", "footer", "divider",
                 "mathematical_expression", "anchor", "list", "blockquote",
-                "expandable_blockquote", "pull_quote", "collage", "slideshow",
+                "expandable_blockquote", "pullquote", "collage", "slideshow",
                 "table", "details", "map", "animation", "audio", "photo",
-                "video", "voice_note", "thinking"}
+                "video", "voice_note", "buttons", "thinking"}
     payload = render.build([_story_ready(), _story_ready("policy")], "جمع‌بندی آزمایشی")
     types = {b["type"] for b in _walk(payload["blocks"])}
     assert types <= accepted, types - accepted
@@ -168,10 +175,19 @@ def test_toggles_are_nested_at_least_two_deep():
     assert depth(payload["blocks"]) >= 2
 
 
-def test_checklist_items_carry_checkbox():
+def test_key_points_render_as_a_real_ordered_list():
+    """Ordered lists key off item["type"], not "label_type".
+
+    Round-tripped live: with `type` the stored labels are "1."/"2."/"3.", with
+    `label_type` they come back as "•" — the field is accepted and silently
+    dropped. The user asked for numbered lists, so this must be `type`.
+    """
     payload = render.build([_story_ready()], "")
     lists = [b for b in _walk(payload["blocks"]) if b["type"] == "list"]
-    assert any(item.get("has_checkbox") for lst in lists for item in lst["items"])
+    numbered_items = [item for lst in lists for item in lst["items"]
+                      if item.get("type") in {"1", "a", "A", "i", "I"}]
+    assert numbered_items, "no ordered list in the bulletin"
+    assert all("label_type" not in item for lst in lists for item in lst["items"])
 
 
 # ── transliteration repair ────────────────────────────────────────────────
@@ -280,13 +296,26 @@ def test_spelling_fix_leaves_correct_text_untouched():
 
 
 def test_digest_and_summary_share_the_same_repairs():
-    """Every reader-visible field must go through the same cleanup chain."""
+    """Every reader-visible field must go through the same cleanup chain.
+
+    The chain now lives in one local helper instead of being repeated per field,
+    so this checks both halves: each field calls the helper, and the helper runs
+    all three repairs. Previously a field could silently skip one of them —
+    that is how «هاکینگ فیس» reached a live post while sibling fields were clean.
+    """
     import inspect
     from radar import enrich
     src = inspect.getsource(enrich._localise_one)
     for field in ("title_fa", "summary_fa", "why_fa"):
         line = [l for l in src.splitlines() if l.strip().startswith(f"{field} =")][0]
-        assert "_fix_spelling" in line and "_repair_translit" in line, field
+        assert "_clean(" in line, field
+    helper = src.split("def _clean(")[1].split("\n\n")[0]
+    for repair in ("_fix_spelling", "_repair_translit", "_repair_brands_grounded"):
+        assert repair in helper, repair
+    # facts, impact and the metric label are reader-visible too.
+    for other in ("facts = ", "impact = ", "story.metric_label = "):
+        line = [l for l in src.splitlines() if l.strip().startswith(other)][0]
+        assert "_clean(" in line, other
 
 
 # ── scraped sources (Anthropic publishes no RSS at all) ──────────────────
@@ -340,51 +369,28 @@ def test_boundary_still_protects_ordinary_words():
 
 
 # ── Telegram's server-side linkifier ─────────────────────────────────────
-def test_feed_category_is_not_turned_into_a_dead_link():
+def test_bulletin_disables_server_side_entity_detection():
     """Live post #98 shipped a table cell reading "arXiv cs.AI"; Telegram
     rewrote it into a link whose href was the literal string "cs.AI" — a dead
-    link, because .AI is a real ccTLD. Probed live: .LG is not a TLD, so only
-    one of three arXiv rows broke, which is how it survived review."""
-    from radar import render
-    out = render.no_autolink("arXiv cs.AI")
-    assert out == "arXiv cs.\u2060AI"
-    assert "cs.AI" not in out
+    link, because .AI is a real ccTLD (.LG is not, which is why only one of
+    three arXiv rows broke and the bug survived review).
+
+    Probed both ways on the live API: without the flag the stored message
+    carries `url` entities with url == text; with it, none. This replaced a
+    U+2060 WORD JOINER hack that had to mutate every string in the tree.
+    """
+    payload = render.build([_story_ready()], "")
+    assert payload["skip_entity_detection"] is True
 
 
-def test_no_autolink_leaves_persian_and_versions_alone():
-    from radar import render
-    assert render.no_autolink("\u0646\u0633\u062e\u0647 \u06f0.\u06f3\u06f4") == "\u0646\u0633\u062e\u0647 \u06f0.\u06f3\u06f4"
-    assert render.no_autolink("GPT-4.5") == "GPT-4.5"          # digits after the dot
-    assert render.no_autolink("Qwen3-4B") == "Qwen3-4B"        # no dot at all
-
-
-def test_no_autolink_never_touches_a_deliberate_link_label():
-    from radar import render
-    link = render.link("cs.AI docs", "https://arxiv.org/list/cs.AI/recent")
-    assert render.no_autolink(link) == link
-
-
-def test_build_neutralises_host_shapes_everywhere_in_the_tree():
-    """One call at the end of build() must cover table cells, checklist facts
-    and the source index alike — not just the cell where it was first seen."""
-    import json
-    from datetime import datetime, timezone
-    from radar import render
-    from radar.sources import Story
-    s = Story(title_en="x", url="https://arxiv.org/abs/1", source="arXiv cs.AI",
-              source_fa="\u0622\u0631\u06a9\u0627\u06cc\u0648",
-              published=datetime.now(timezone.utc), summary_en="y", tier=3)
-    s.title_fa = "\u0639\u0646\u0648\u0627\u0646"
-    s.summary_fa = "\u062e\u0644\u0627\u0635\u0647"
-    s.why_fa = ""
-    s.facts = ["\u0646\u06a9\u062a\u0647 cs.AI"]
-    s.score = 9
-    s.section = "models"
-    s.also_seen_in = []
-    raw = json.dumps(render.build([s], ""), ensure_ascii=False)
-    assert "cs.\u2060AI" in raw
-    import re
-    assert not re.search(r"cs\.(?!\u2060)AI", raw)
+def test_explicit_links_still_work_under_skip_entity_detection():
+    """The flag must not cost us real links: verified live that a `url` element
+    survives while bare host-shaped text stops being linkified."""
+    payload = render.build([_story_ready()], "")
+    urls = [t for b in _walk(payload["blocks"])
+            for t in (b.get("text") if isinstance(b.get("text"), list) else [])
+            if isinstance(t, dict) and t.get("type") == "url"]
+    assert any(t["url"].startswith("https://") for t in urls)
 
 
 # ── photos ────────────────────────────────────────────────────────────────
@@ -407,13 +413,14 @@ def test_photo_caption_must_be_an_object():
     assert render.photo("u", caption=rich)["caption"] == rich
 
 
-def test_photo_url_survives_the_autolink_guard():
-    """no_autolink must not corrupt the media URL — 'example.com' inside a photo
-    block is a real address, not prose."""
+def test_media_urls_are_never_mangled():
+    """Photo/collage URLs are real addresses, not prose: nothing in the render
+    path may rewrite them. (The old WORD JOINER guard had to special-case them;
+    `skip_entity_detection` removes that whole class of risk.)"""
     import json
     from radar import render
-    raw = json.dumps(render.no_autolink(render.photo("https://cdn.example.com/a.jpg")))
-    assert "https://cdn.example.com/a.jpg" in raw
+    raw = json.dumps(render.build([_story_ready()], ""))
+    assert "https://img.example.com/lead.jpg" in raw
 
 
 def test_lead_image_is_not_repeated_inside_its_own_story():
@@ -549,3 +556,277 @@ def test_junk_filter_drops_site_logos_from_any_path_position():
         assert sources._JUNK_IMAGE.search(u), u
     for u in art:
         assert not sources._JUNK_IMAGE.search(u), u
+
+
+# ── design variety (the user's complaint: "قالب پیامای الان همه‌شون شبیه همه") ──
+def test_consecutive_bulletins_do_not_look_identical():
+    """Four 6-hour slots must rotate through different structural themes.
+
+    There is no colour/font field in the API (probed: `color`, `theme`, `font`
+    are accepted and silently dropped), so visual identity has to come from
+    rotating which quote form, gallery type and glyph set a bulletin uses.
+    """
+    import json
+    from datetime import datetime, timezone
+    from radar import render
+    shapes = set()
+    for hour in (1, 7, 13, 19):
+        now = datetime(2026, 9, 3, hour, tzinfo=timezone.utc)
+        th = render._theme(now)
+        shapes.add(json.dumps(th, sort_keys=True, ensure_ascii=False))
+    assert len(shapes) == 4, "two of four daily slots render the same theme"
+
+
+def test_each_section_gets_its_own_list_and_quote_style():
+    """Inside one bulletin, a research item must not read like a funding item."""
+    from radar import render
+    quotes = {v["quote"] for v in render._SECTION_STYLE.values()}
+    bullets = {v["bullet"] for v in render._SECTION_STYLE.values()}
+    assert len(quotes) >= 3, quotes
+    assert len(bullets) >= 3, bullets
+
+
+def test_photos_appear_at_top_level_not_only_inside_toggles():
+    """Art buried in a collapsed toggle is invisible until tapped — which is why
+    the user saw "هیچ عکسی نیست" on a bulletin that did ship two photos."""
+    from radar import render
+    payload = render.build([_story_ready(), _story_ready("business")], "")
+    top = {b["type"] for b in payload["blocks"]}
+    assert "photo" in top, top
+
+
+def test_mid_message_gallery_never_repeats_a_story_photo():
+    """The gallery and the per-story photos draw from the same pool, so a photo
+    used in the band must be suppressed inside its own toggle."""
+    import json
+    from datetime import datetime, timezone
+    from radar import render
+    from radar.sources import Story
+
+    def mk(i):
+        s = Story(title_en=f"t{i}", url=f"https://x/{i}", source="Wired",
+                  source_fa="وایرد", tier=2,
+                  published=datetime.now(timezone.utc), summary_en="y")
+        s.title_fa = f"تیتر {i}"
+        s.summary_fa = "خلاصه"
+        s.section = "models"
+        s.score = 8
+        s.image = f"https://img/{i}.jpg"
+        return s
+
+    payload = render.build([mk(i) for i in range(1, 5)], "")
+    raw = json.dumps(payload)
+    for i in range(1, 5):
+        assert raw.count(f"https://img/{i}.jpg") == 1, f"image {i} duplicated"
+
+
+def test_analytical_fields_are_rendered_when_present():
+    """The user rejected "نکات کلیدی" that merely copied the story. The renderer
+    must surface the inferred fields (impact, the key number) prominently."""
+    import json
+    from radar import render
+    s = _story_ready()
+    raw = json.dumps(render.build([s], ""), ensure_ascii=False)
+    assert s.impact_fa in raw
+    assert s.metric_label in raw and s.metric_value in raw
+    assert "pullquote" in raw          # impact gets its own visual treatment
+
+
+def test_latex_is_rendered_as_a_math_block_not_prose():
+    import json
+    from radar import render
+    s = _story_ready()
+    s.latex = r"L(N) \approx A N^{-0.34}"
+    blocks = render.build([s], "")["blocks"]
+    exprs = [b for b in _walk(blocks) if b["type"] == "mathematical_expression"]
+    assert exprs and exprs[0]["expression"] == s.latex
+
+
+def test_buttons_always_carry_a_url():
+    """Probed live: a button with an empty url, an `anchor_name`, or no url at
+    all is rejected with "Text buttons are not allowed in the inline keyboard",
+    which fails the ENTIRE bulletin. In-post navigation must use anchor_link."""
+    from radar import render
+    payload = render.build([_story_ready()], "")
+    for b in _walk(payload["blocks"]):
+        if b["type"] == "buttons":
+            for btn in b["buttons"]:
+                assert btn.get("url", "").startswith("http"), btn
+
+
+# ── key points must be analysis, not copied sentences ────────────────────
+def test_key_points_that_merely_repeat_the_summary_are_dropped():
+    """The exact complaint: "تو نکات کلیدی فقط یه چندتا جمله از تو خود خبر
+    انتخاب میشه و گذاشته میشه که اصلا ارزشی نداره"."""
+    from radar import enrich
+    summary = "گوگل مدل جدید خود را با تمرکز بر استدلال و کاهش هزینه معرفی کرد."
+    assert enrich._too_similar("گوگل مدل جدید خود را با تمرکز بر استدلال معرفی کرد", summary)
+    assert not enrich._too_similar("هزینه هر میلیون توکن ۳۰ درصد کاهش یافت", summary)
+
+
+def test_similarity_tolerates_shared_brand_names():
+    """A key point naming the same company as the summary is not a copy."""
+    from radar import enrich
+    summary = "OpenAI مدل تازه‌ای برای استدلال ریاضی معرفی کرد و قیمت را کاهش داد."
+    assert not enrich._too_similar("OpenAI برای نخستین بار وزن‌ها را منتشر می‌کند", summary)
+
+
+def test_plain_fallback_keeps_the_analytical_fields():
+    """The fallback is the emergency path; it must not silently drop the
+    analysis and regress to a bare list of copied sentences."""
+    from radar import telegram
+    s = _story_ready()
+    out = telegram.plain_fallback([s], "جمع‌بندی")
+    assert s.impact_fa in out
+    assert s.metric_value in out
+    assert "1. " in out          # numbered, matching the rich renderer
+
+
+# ── source-grounded brand repair ──────────────────────────────────────────
+def test_brand_repair_is_grounded_in_the_english_source():
+    """Two real live defects, both invisible to the Persian audit (100% Persian
+    letters, no Latin residue): «هاکینگ فیس» for Hugging Face and «کراداستریک»
+    for CrowdStrike. Neither was in TRANSLIT_FIX, which is why a fixed
+    dictionary is not enough."""
+    from radar.enrich import _repair_brands_grounded as fix
+    out = fix("شرکت Nvidia موافقت کرده است تا پلتفرم هاکینگ فیس را خریداری کند.",
+              "Nvidia agrees to buy Hugging Face in a $12.9 billion deal")
+    assert "Hugging Face" in out and "هاکینگ" not in out
+
+    out = fix("مدیرعامل کراداستریک درباره امنیت گفت.",
+              "CrowdStrike CEO George Kurtz on AI security")
+    # Headline case glues the job title on ("CrowdStrike CEO"); substituting the
+    # glued candidate produced «مدیرعامل CrowdStrike CEO» in a real run.
+    assert "CrowdStrike" in out and "CEO" not in out
+
+
+def test_brand_repair_never_rewrites_ordinary_persian_prose():
+    """The failure mode to avoid is the «پرونده» → «Proنده» class: a Persian word
+    whose skeleton resembles a brand in the source."""
+    from radar.enrich import _repair_brands_grounded as fix
+    prose = "پژوهشگران این ابزار را بررسی کردند و پرونده جدیدی گشودند."
+    assert fix(prose, "Perplexity launches a research agent") == prose
+
+
+def test_brand_repair_leaves_persian_household_names_alone():
+    """گوگل/آمازون are standard in Persian journalism; forcing them to Latin
+    makes the text read worse, and the user asked for Persian."""
+    from radar.enrich import _repair_brands_grounded as fix
+    prose = "گوگل اعلام کرد که مدل تازه را منتشر می‌کند."
+    assert fix(prose, "Google DeepMind ships Gemini upgrades") == prose
+
+
+def test_brand_repair_cannot_invent_a_name_absent_from_the_source():
+    """Only names present in this story's own English text are candidates."""
+    from radar.enrich import _repair_brands_grounded as fix
+    txt = "شرکت کراداستریک محصول جدیدی معرفی کرد."
+    assert fix(txt, "Microsoft ships a new Windows build") == txt
+
+
+def test_velar_and_soft_c_collapse_in_the_skeleton():
+    """Persian transliteration swaps ک/گ freely and "Face" ends in /s/, not /k/;
+    without both rules «هاکینگ فیس» scored 0.67 against "Hugging Face" and the
+    live defect went unrepaired."""
+    from difflib import SequenceMatcher
+    from radar.enrich import _skeleton_fa, _skeleton_latin
+    ratio = SequenceMatcher(None, _skeleton_latin("Hugging Face"),
+                            _skeleton_fa("هاکینگفیس")).ratio()
+    assert ratio >= 0.82
+
+
+def test_headline_case_words_are_not_treated_as_brands():
+    """Measured on live message 5058: headline case capitalises every word, so
+    "Safety Awareness Benchmark" made the repair fire on ordinary Persian —
+    «این بنچمارک» → «این Benchmark», «۱۸۰۰ پیکسل» → «۱۸۰۰ PCs», «سال جاری» →
+    «سال Garrett» — dropping the bulletin from 98.7% to 93.8% Persian."""
+    from radar.enrich import _latin_brands, _repair_brands_grounded as fix
+    assert _latin_brands("A new Safety Awareness Benchmark for deployment") == []
+
+    unchanged = "این بنچمارک با هر ارزیابی سازگار کار می‌کند و واریانس را می‌سنجد."
+    assert fix(unchanged, "A new Safety Awareness Benchmark for deployment") == unchanged
+
+    px = "نمایشگر اولد با رزولوشن ۲۸۸۰ در ۱۸۰۰ پیکسل است."
+    assert fix(px, "Lenovo Yoga 9n has a 16-inch OLED at 2880 by 1800 pixels") == px
+
+    yr = "شرکت Flock اعلام کرده تا پایان سال جاری قوانین را اعمال می‌کند."
+    assert fix(yr, "Flock CEO Garrett Langley said rules arrive by year end") == yr
+
+
+def test_two_word_brands_still_repair_after_the_vocabulary_filter():
+    """"Safety" alone is vocabulary, but "Flock Safety" is a company: the phrase
+    survives because one of its parts qualifies."""
+    from radar.enrich import _repair_brands_grounded as fix
+    out = fix("شرکت فلاک سیفتی شبکه دوربین را گسترش داد.",
+              "Flock Safety expands camera network across Texas")
+    assert "Flock Safety" in out
+
+
+def test_short_skeletons_are_rejected_as_too_ambiguous():
+    """Measured on live message 5061: "Garrett" reduces to the 3-consonant
+    skeleton KRT, which scores 1.00 against «کارت» (card) and 0.86 against
+    «کارت‌های», and the bulletin shipped «تا پایان سال جاری میلادی Garrett
+    اجباری». Skeletons shorter than 5 consonants are not discriminating."""
+    from radar.enrich import _repair_brands_grounded as fix
+    src = ("Flock Safety says CEO Garrett Langley will require case numbers "
+           "and automatic audits by year end")
+    for txt in ("تا پایان سال جاری میلادی کارت اجباری اعمال می‌شود.",
+                "شرکت کارت‌های پرونده را اجباری می‌کند."):
+        assert fix(txt, src) == txt
+
+
+def test_long_skeleton_brands_still_repair():
+    """The 5-consonant floor must not cost any real repair."""
+    from radar.enrich import _repair_brands_grounded as fix
+    wins = [
+        ("Nvidia agrees to buy Hugging Face", "پلتفرم هاکینگ فیس", "Hugging Face"),
+        ("CrowdStrike CEO on security", "شرکت کراداستریک", "CrowdStrike"),
+        ("Flock Safety expands cameras", "شرکت فلاک سیفتی", "Flock Safety"),
+        ("Mistral raises funding", "شرکت میسترال", "Mistral"),
+    ]
+    for src, txt, want in wins:
+        assert want in fix(txt, src), want
+
+
+def test_curated_brands_match_spelling_variants():
+    """The live defect «هاکینگ فیس» was one letter away from the dictionary entry
+    «هاگینگ فیس» (گ vs ک), which is why an exact-string table missed it. Curated
+    brands are matched by skeleton so any variant of a KNOWN brand is caught."""
+    from radar.enrich import _repair_brands_grounded as fix
+    for variant in ("هاکینگ فیس", "هاگینگ فیس", "هاگینگفیس"):
+        assert "Hugging Face" in fix(f"پلتفرم {variant} فروخته شد", "")
+
+
+def test_source_derived_names_use_a_stricter_floor():
+    """Live 5063: «مقیاس بزرگ‌تر» (BSRKTR) matched "Abstract" (BSTRKT) at 0.83,
+    so open-ended source names need a higher floor than curated ones."""
+    from radar.enrich import _repair_brands_grounded as fix, _CURATED_MIN_RATIO, _GROUNDED_MIN_RATIO
+    assert _GROUNDED_MIN_RATIO > _CURATED_MIN_RATIO
+    txt = "فریب مدل‌های با مقیاس بزرگ‌تر می‌شود."
+    assert fix(txt, "Abstract We study Qwen3 models. Larger models deceived.") == txt
+
+
+def test_common_english_stragglers_are_translated():
+    """Live 5065 shipped «ماه September» and «فناوری Rendering عصبی». The audit
+    counts Latin *words*, so one or two per sentence always pass — exactly the
+    "mostly Persian with English sprinkled in" outcome the user rejected."""
+    from radar.enrich import _translate_stragglers as tr
+    assert "سپتامبر" in tr("سرویس در ماه September میزبان بازی است.")
+    assert "رندرینگ" in tr("بازی از فناوری Rendering عصبی بهره می‌برد.")
+
+
+def test_straggler_translation_never_breaks_a_proper_name():
+    """"Visual Concepts" and "GeForce NOW" are names: a capitalised Latin
+    neighbour means the word belongs to the name and must stay."""
+    from radar.enrich import _translate_stragglers as tr
+    for keep in ("این فناوری نتیجه همکاری Nvidia با استودیوهای Visual Concepts است.",
+                 "سرویس GeForce NOW فعال است.",
+                 "شرکت Flock Safety دوربین‌ها را گسترش داد."):
+        assert tr(keep) == keep
+
+
+def test_clean_helper_runs_the_straggler_pass_too():
+    import inspect
+    from radar import enrich
+    src = inspect.getsource(enrich._localise_one)
+    helper = src.split("def _clean(")[1].split("\n\n")[0]
+    assert "_translate_stragglers" in helper
