@@ -94,6 +94,28 @@ def main(argv: list[str] | None = None) -> int:
     picked = enrich.triage(fresh, args.limit)
     log(f"  kept {len(picked)}: " + ", ".join(f"{s.section}/{s.score:.0f}" for s in picked))
 
+    # The window guard above counts UNSEEN stories, but triage can still gut the
+    # bulletin afterwards: post 125 had 6 unseen items, three of which the scorer
+    # rated 0 (promotional round-ups), and shipped THREE stories — 13 block types
+    # instead of 17, no gallery band (that needs two spare images), 2 photos. A
+    # thin post is the original «خشک و خالی» complaint no matter which stage
+    # thinned it, so the ladder has to be re-checked against what SURVIVED
+    # triage, not against what was merely fresh.
+    if len(picked) < config.MIN_STORIES and not args.lookback_fixed:
+        for hours in config.WIDEN_LADDER:
+            if hours <= args.lookback:
+                continue
+            log(f"  only {len(picked)} survived triage — retrying at {hours}h")
+            wider = [s for s in sources.collect(hours) if s.fingerprint not in seen]
+            if len(wider) <= len(fresh):
+                continue          # nothing new to score; don't pay for a call
+            fresh = wider
+            picked = enrich.triage(fresh, args.limit)
+            log(f"  kept {len(picked)}: "
+                + ", ".join(f"{s.section}/{s.score:.0f}" for s in picked))
+            if len(picked) >= config.MIN_STORIES:
+                break
+
     log("translating (audited)...")
     ready = enrich.localise(picked)
     rejected = len(picked) - len(ready)

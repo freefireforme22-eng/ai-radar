@@ -1481,3 +1481,56 @@ def test_persian_on_the_card_is_reshaped_and_reordered():
     # presentation forms live in the U+FB50..U+FEFF Arabic Presentation Forms blocks
     assert any(0xFB50 <= ord(ch) <= 0xFEFF for ch in shaped)
     assert shaped[0] != raw[0], "visual order was not reversed for RTL"
+
+
+def test_thin_triage_result_widens_the_window_too():
+    """Post 125: 6 unseen stories, three scored 0 as promo round-ups, bulletin
+    shipped THREE items — 13 block types and no gallery band. The fresh-count
+    guard passed (6 >= MIN_STORIES) and the thinning happened downstream, so the
+    ladder must also re-check what survived triage."""
+    import radar.run as run_mod
+    from radar import config
+
+    pool_8h = [_fake_story(f"a{i}", hours_old=1) for i in range(6)]
+    pool_24h = pool_8h + [_fake_story(f"b{i}", hours_old=20) for i in range(14)]
+
+    calls = []
+
+    def fake_collect(hours):
+        calls.append(hours)
+        return list(pool_24h if hours > config.LOOKBACK_HOURS else pool_8h)
+
+    def fake_triage(stories, keep):
+        # the scorer rejects everything from the narrow pool but likes the wider one
+        good = [s for s in stories if s.url.startswith("https://x/b")]
+        return good[:keep] if good else stories[:3]
+
+    monkey = _Monkey()
+    monkey.set(run_mod.sources, "collect", fake_collect)
+    monkey.set(run_mod.enrich, "triage", fake_triage)
+    monkey.set(run_mod, "load_seen", lambda: {})
+    monkey.set(run_mod.enrich, "localise", lambda picked: picked)
+    monkey.set(run_mod.enrich, "digest", lambda ready: "خلاصه")
+    try:
+        rc = run_mod.main(["--dry-run", "--no-audio", "--no-cover"])
+    finally:
+        monkey.undo()
+    assert rc == 0
+    assert any(h > config.LOOKBACK_HOURS for h in calls), \
+        f"never widened after a thin triage; collect() called with {calls}"
+
+
+class _Monkey:
+    """Tiny setattr/undo helper: these tests patch module attributes and must
+    restore them even on failure, since the whole suite shares one import."""
+
+    def __init__(self):
+        self._saved = []
+
+    def set(self, obj, name, value):
+        self._saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def undo(self):
+        for obj, name, old in reversed(self._saved):
+            setattr(obj, name, old)
