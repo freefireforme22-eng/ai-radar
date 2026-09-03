@@ -72,6 +72,12 @@ USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 MAX_STORIES = 9           # per bulletin; more than this and the toggles get unreadable
 MAX_PER_SECTION = 3
 LOOKBACK_HOURS = 8        # slight overlap with the 6h cadence so nothing slips through
+# A bulletin with one story is worse than no bulletin: measured live on channel
+# post 106, where 8 of 9 stories in the window had already been published and
+# the post shipped a single item. When the fresh count falls under this floor
+# the window is widened (see run.py) instead of publishing something thin.
+MIN_STORIES = 4
+WIDEN_LADDER = (24, 72, 168)   # hours, tried in order when the window is thin
 STATE_PATH = os.environ.get("RADAR_STATE", "data/seen.json")
 STATE_KEEP = 4000         # remembered fingerprints
 

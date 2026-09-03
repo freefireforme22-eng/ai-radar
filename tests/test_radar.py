@@ -1007,3 +1007,85 @@ def test_every_section_bullet_kind_is_a_documented_label_type():
     documented = {"1", "a", "A", "i", "I"}
     for key, style in render._SECTION_STYLE.items():
         assert style["bullet"] in documented, key
+
+
+# ── thin-bulletin guard (channel post 106 shipped ONE story) ──────────────
+def _fake_story(fp, hours_old=1):
+    """`fingerprint` is a read-only property derived from the url, so vary the
+    url and read the fingerprint back instead of assigning it."""
+    from datetime import timedelta
+    return Story(
+        title_en=f"Story {fp}", url=f"https://example.com/{fp}", source="Test",
+        source_fa="تست", tier=1, published=datetime.now(timezone.utc) - timedelta(hours=hours_old),
+    )
+
+
+def test_window_widens_when_almost_everything_was_already_published(monkeypatch, tmp_path):
+    """Channel post 106: 9 stories in the window, 8 already seen, so the
+    bulletin shipped a single item -- no sections, no gallery, nothing to read.
+    The pipeline must widen the window instead of publishing something thin."""
+    from radar import run as run_mod
+
+    calls = []
+
+    def fake_collect(hours):
+        calls.append(hours)
+        # The 8h window holds 3 stories, 2 of them already published; the wider
+        # windows hold progressively more unseen material.
+        if hours <= 8:
+            return [_fake_story("old1"), _fake_story("old2"), _fake_story("new1")]
+        return [_fake_story("old1"), _fake_story("old2"),
+                _fake_story("new1"), _fake_story("new2"),
+                _fake_story("new3"), _fake_story("new4")]
+
+    monkeypatch.setattr(run_mod.sources, "collect", fake_collect)
+    monkeypatch.setattr(run_mod, "load_seen",
+                        lambda: {_fake_story("old1").fingerprint: 1,
+                                 _fake_story("old2").fingerprint: 1})
+    monkeypatch.setattr(run_mod.enrich, "triage", lambda st, keep=None: st[:keep or 9])
+    monkeypatch.setattr(run_mod.enrich, "localise", lambda st: st)
+    monkeypatch.setattr(run_mod.enrich, "digest", lambda st: "جمع‌بندی")
+
+    rc = run_mod.main(["--dry-run", "--no-audio", "--lookback", "8"])
+    assert rc == 0
+    assert calls[0] == 8, "the configured window must be tried first"
+    assert len(calls) > 1, "a thin window must trigger a widen"
+    assert calls[1] in config.WIDEN_LADDER
+
+
+def test_a_healthy_window_is_never_widened(monkeypatch):
+    """The widen must be a fallback, not a habit: enough fresh material means
+    exactly one fetch, so the bulletin stays as fresh as the cadence allows."""
+    from radar import run as run_mod
+
+    calls = []
+
+    def fake_collect(hours):
+        calls.append(hours)
+        return [_fake_story(f"s{i}") for i in range(7)]
+
+    monkeypatch.setattr(run_mod.sources, "collect", fake_collect)
+    monkeypatch.setattr(run_mod, "load_seen", lambda: {})
+    monkeypatch.setattr(run_mod.enrich, "triage", lambda st, keep=None: st[:keep or 9])
+    monkeypatch.setattr(run_mod.enrich, "localise", lambda st: st)
+    monkeypatch.setattr(run_mod.enrich, "digest", lambda st: "جمع‌بندی")
+
+    run_mod.main(["--dry-run", "--no-audio", "--lookback", "8"])
+    assert calls == [8], f"expected a single fetch, got {calls}"
+
+
+def test_lookback_fixed_opts_out_of_widening(monkeypatch):
+    """A preview asking for an exact window must get that window, so measuring
+    the real cadence stays possible."""
+    from radar import run as run_mod
+
+    calls = []
+    monkeypatch.setattr(run_mod.sources, "collect",
+                        lambda h: (calls.append(h), [_fake_story("only")])[1])
+    monkeypatch.setattr(run_mod, "load_seen", lambda: {})
+    monkeypatch.setattr(run_mod.enrich, "triage", lambda st, keep=None: st)
+    monkeypatch.setattr(run_mod.enrich, "localise", lambda st: st)
+    monkeypatch.setattr(run_mod.enrich, "digest", lambda st: "جمع‌بندی")
+
+    run_mod.main(["--dry-run", "--no-audio", "--lookback", "8", "--lookback-fixed"])
+    assert calls == [8]

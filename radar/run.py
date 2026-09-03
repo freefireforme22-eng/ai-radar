@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--plain", action="store_true", help="force the plain-text renderer")
     ap.add_argument("--no-audio", action="store_true",
                     help="skip the Persian narration (faster; text and images only)")
+    ap.add_argument("--lookback-fixed", action="store_true",
+                    help="never widen the window, even if too few stories are fresh")
     ap.add_argument("--save-payload", metavar="PATH", help="write the rich payload as JSON")
     args = ap.parse_args(argv)
 
@@ -60,6 +62,23 @@ def main(argv: list[str] | None = None) -> int:
     seen = load_seen()
     fresh = [s for s in raw if s.fingerprint not in seen]
     log(f"  {len(fresh)} unseen ({len(raw)-len(fresh)} already published)")
+
+    # A thin bulletin is the failure the channel actually shows: post 106 shipped
+    # ONE story because 8 of the 9 in the window were already published, and a
+    # single-item bulletin has no gallery, no sections, nothing to read. Widen
+    # the window until there is enough material rather than posting something
+    # empty — older-but-unseen beats fresh-but-alone.
+    if fresh and len(fresh) < config.MIN_STORIES and not args.lookback_fixed:
+        for hours in config.WIDEN_LADDER:
+            if hours <= args.lookback:
+                continue
+            log(f"  only {len(fresh)} fresh — widening the window to {hours}h")
+            raw = sources.collect(hours)
+            fresh = [s for s in raw if s.fingerprint not in seen]
+            log(f"  {len(fresh)} unseen in {hours}h")
+            if len(fresh) >= config.MIN_STORIES:
+                break
+
     if not fresh:
         log("no new stories — staying silent")
         return 0
