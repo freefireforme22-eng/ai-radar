@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from . import config, enrich, render, sources, telegram
+from . import audio, config, enrich, render, sources, telegram
 
 
 def load_seen() -> dict:
@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=config.MAX_STORIES)
     ap.add_argument("--lookback", type=int, default=config.LOOKBACK_HOURS)
     ap.add_argument("--plain", action="store_true", help="force the plain-text renderer")
+    ap.add_argument("--no-audio", action="store_true",
+                    help="skip the Persian narration (faster; text and images only)")
     ap.add_argument("--save-payload", metavar="PATH", help="write the rich payload as JSON")
     args = ap.parse_args(argv)
 
@@ -77,10 +79,21 @@ def main(argv: list[str] | None = None) -> int:
     log("writing the editor's summary...")
     summary = enrich.digest(ready)
 
+    # Narration is optional and must never be able to block a bulletin: any
+    # failure inside `audio.narrate` returns "" and the post ships text-only.
+    narration_id = ""
+    if not args.plain and not args.no_audio:
+        log("synthesising the Persian narration...")
+        narration_id = audio.narrate(
+            summary, [s.title_fa for s in ready],
+            args.preview or config.CHANNEL_ID,
+            voice=render.current_voice())
+        log("  narration attached" if narration_id else "  narration unavailable — text only")
+
     if args.plain:
         payload, kind = telegram.plain_fallback(ready, summary), "plain"
     else:
-        payload, kind = render.build(ready, summary), "rich"
+        payload, kind = render.build(ready, summary, narration_id), "rich"
 
     if args.save_payload:
         with open(args.save_payload, "w", encoding="utf-8") as f:
@@ -111,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             for s in ready:
                 s.image = ""
             try:
-                mid = telegram.send_rich(render.build(ready, summary), target)
+                mid = telegram.send_rich(render.build(ready, summary, narration_id), target)
                 log(f"posted message_id={mid} (rich, images dropped)")
                 return _save_state(args, ready, seen)
             except telegram.TelegramError as e2:

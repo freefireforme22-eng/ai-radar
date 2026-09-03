@@ -830,3 +830,54 @@ def test_clean_helper_runs_the_straggler_pass_too():
     src = inspect.getsource(enrich._localise_one)
     helper = src.split("def _clean(")[1].split("\n\n")[0]
     assert "_translate_stragglers" in helper
+
+
+# ── narrated edition (answers "خیلی خشک و خالیه فقط متنه") ────────────────
+def test_narration_block_uses_the_probed_audio_shape():
+    """`audio` + file_id in an InputMedia object, with a caption that survives.
+
+    Probed live: `voice_note` is also accepted but SILENTLY DROPS the caption,
+    so the narration would arrive unlabelled. `audio` keeps it."""
+    payload = render.build([_story_ready()], "جمع‌بندی", "FILEID123")
+    blocks = [b for b in _walk(payload["blocks"]) if b["type"] == "audio"]
+    assert len(blocks) == 1
+    a = blocks[0]
+    assert a["audio"] == {"type": "audio", "media": "FILEID123"}
+    assert a["caption"]["text"], "narration must be labelled"
+
+
+def test_bulletin_without_narration_is_unchanged():
+    """TTS must never be able to break a bulletin: no file_id, no audio block,
+    everything else identical."""
+    quiet = render.build([_story_ready()], "جمع‌بندی")
+    loud = render.build([_story_ready()], "جمع‌بندی", "FILEID123")
+    assert not [b for b in _walk(quiet["blocks"]) if b["type"] == "audio"]
+    assert len(loud["blocks"]) == len(quiet["blocks"]) + 1
+
+
+def test_narration_script_is_persian_and_bounded():
+    from radar import audio as tts
+    script = tts.narration_text("جمع‌بندی سردبیر امروز.",
+                                ["تیتر اول", "تیتر دوم", "تیتر سوم",
+                                 "تیتر چهارم", "تیتر پنجم", "تیتر ششم"],
+                                clock="۱۲:۳۰")
+    assert script.startswith("رادار هوش مصنوعی.")
+    assert "تیتر پنجم" in script and "تیتر ششم" not in script, "at most 5 headlines"
+    assert len(script) <= 1800
+    import re as _re
+    latin = _re.findall(r"[A-Za-z]{2,}", script)
+    assert not latin, f"narration script must be Persian, found {latin}"
+
+
+def test_narrator_voice_rotates_with_the_theme():
+    from radar import audio as tts
+    voices = {render._theme(datetime(2026, 9, 4, h, 0)) ["voice"] for h in (1, 7, 13, 19)}
+    assert len(voices) >= 2, "consecutive bulletins must not all use one voice"
+    assert voices <= set(tts.VOICES)
+
+
+def test_narration_failure_returns_empty_string(monkeypatch):
+    """Every failure path must degrade to "" rather than raising."""
+    from radar import audio as tts
+    monkeypatch.setattr(tts, "synthesise", lambda *a, **k: "")
+    assert tts.narrate("جمع‌بندی", ["تیتر"], 123) == ""

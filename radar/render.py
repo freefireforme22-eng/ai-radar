@@ -171,6 +171,21 @@ def slideshow(urls, caption=None):
     return block
 
 
+def audio(file_id, caption=None):
+    """An audio block, addressed by Telegram `file_id`.
+
+    Probed live: `media` accepts a `file_id`, so narration needs no public
+    hosting (see telegram.upload_audio for how the id is minted). `sendAudio`
+    rather than `sendVoice` because `caption` SURVIVES on an `audio` block and is
+    silently dropped on `voice_note` — measured, both accepted, only one keeps
+    the label.
+    """
+    block = {"type": "audio", "audio": {"type": "audio", "media": file_id}}
+    if caption:
+        block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
+    return block
+
+
 def pre(text, language="text"):
     return {"type": "pre", "text": text, "language": language}
 
@@ -260,13 +275,17 @@ def _tehran_now() -> datetime:
 # means four consecutive bulletins never look the same.
 _THEMES = [
     {"mark": "🛰", "accent": "primary", "digest": "pullquote",
-     "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage"},
+     "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage",
+     "voice": "fa-IR-DilaraNeural"},
     {"mark": "🌐", "accent": "success", "digest": "blockquote",
-     "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow"},
+     "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow",
+     "voice": "fa-IR-FaridNeural"},
     {"mark": "🧭", "accent": "danger", "digest": "expandable",
-     "rule": "━━━━━", "glance": "📌", "gallery": "collage"},
+     "rule": "━━━━━", "glance": "📌", "gallery": "collage",
+     "voice": "fa-IR-FaridNeural"},
     {"mark": "🔭", "accent": "link", "digest": "pullquote",
-     "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow"},
+     "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow",
+     "voice": "fa-IR-DilaraNeural"},
 ]
 
 # Section accents: each section gets its own heading size and quote form so a
@@ -283,8 +302,13 @@ def _theme(now: datetime) -> dict:
     return _THEMES[((now.timetuple().tm_yday * 4) + now.hour // 6) % len(_THEMES)]
 
 
+def current_voice() -> str:
+    """The narrator for this slot, so audio rotates with the visual theme."""
+    return _theme(_tehran_now())["voice"]
+
+
 # ── the bulletin ─────────────────────────────────────────────────────────
-def build(stories: list[Story], summary_fa: str = "") -> dict:
+def build(stories: list[Story], summary_fa: str = "", narration_id: str = "") -> dict:
     now = _tehran_now()
     clock = f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS)
     th = _theme(now)
@@ -308,6 +332,14 @@ def build(stories: list[Story], summary_fa: str = "") -> dict:
 
     if summary_fa:
         blocks.append(_digest_block(th["digest"], summary_fa))
+
+    # Narrated edition: the single strongest answer to "فقط متنه" — a bulletin
+    # you can listen to. Optional by design; if TTS or the upload failed,
+    # `narration_id` is "" and the bulletin ships unchanged.
+    if narration_id:
+        blocks.append(audio(narration_id, caption={"text": [
+            bold("🎧 روایت صوتی این بولتن"), "  ·  ",
+            italic("خوانده‌شده به فارسی")]}))
 
     blocks.append(buttons([
         ("📡 کانال رادار", "https://t.me/ai_newsBY", th["accent"]),

@@ -45,6 +45,68 @@ def send_text(text: str, chat_id: str | int | None = None) -> int:
     return res["result"]["message_id"]
 
 
+def delete(message_id: int, chat_id: str | int | None = None) -> bool:
+    chat = chat_id or config.CHANNEL_ID
+    return bool(_api("deleteMessage", {"chat_id": chat,
+                                       "message_id": message_id}).get("ok"))
+
+
+def upload_audio(path: str, chat_id: str | int | None = None,
+                 *, title: str = "") -> str:
+    """Upload an mp3 and return its `file_id`, deleting the carrier message.
+
+    Rich-message media blocks take an `InputMedia` object, and `media` accepts a
+    `file_id` — probed live — so audio does not need public hosting. But there
+    is no upload endpoint for rich messages: the only way to mint a `file_id` is
+    to send the file through a normal method first. So this posts it silently,
+    grabs the id, and deletes the carrier. The `file_id` stays valid afterwards.
+
+    Sent with `sendAudio`, not `sendVoice`: `caption` survives on an `audio`
+    rich block and is dropped on `voice_note` (measured), and the audio block
+    keeps the title/performer metadata a bulletin wants.
+    """
+    if not config.BOT_TOKEN:
+        raise TelegramError("TG_BOT_TOKEN is not set")
+    chat = chat_id or config.CHANNEL_ID
+    boundary = "----radarboundary7d1f"
+    fields = {"chat_id": str(chat), "disable_notification": "true"}
+    if title:
+        fields["title"] = title
+
+    body = b""
+    for key, value in fields.items():
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f"name=\"{key}\"\r\n\r\n{value}\r\n").encode("utf-8")
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; "
+             f"filename=\"narration.mp3\"\r\n"
+             f"Content-Type: audio/mpeg\r\n\r\n").encode("utf-8")
+    body += blob + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendAudio"
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        res = json.load(urllib.request.urlopen(req, timeout=120))
+    except urllib.error.HTTPError as e:
+        try:
+            res = json.load(e)
+        except Exception:
+            raise TelegramError(f"HTTP {e.code}") from e
+    if not res.get("ok"):
+        raise TelegramError(res.get("description", "audio upload failed"))
+
+    result = res["result"]
+    file_id = (result.get("audio") or {}).get("file_id", "")
+    try:
+        delete(result["message_id"], chat)
+    except Exception:
+        pass          # the id is what matters; a stray carrier is not fatal
+    return file_id
+
+
 def _esc(text: str) -> str:
     return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
