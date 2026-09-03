@@ -36,6 +36,7 @@ class Story:
     score: float = 0.0
     facts: list[str] = field(default_factory=list)
     also_seen_in: list[str] = field(default_factory=list)
+    image: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -112,6 +113,46 @@ def _link(node) -> str:
     return ""
 
 
+_MEDIA = "{http://search.yahoo.com/mrss/}"
+
+# Tracking pixels, share buttons, and site logos that masquerade as article art.
+# `logo` has to match anywhere in the path, not just immediately before the
+# extension: a real dry-run illustrated two arXiv papers with
+# `static.arxiv.org/icons/twitter/arxiv-logo-twitter-square.png`, which is the
+# site's own Twitter card badge. A generic site logo on every paper is worse
+# than no picture, because it makes distinct stories look like duplicates.
+_JUNK_IMAGE = re.compile(
+    r"(?i)(doubleclick|scorecardresearch|google-analytics|/pixel|spacer|"
+    r"1x1|blank\.gif|gravatar|feedburner|/badge|/button|logo|/icons?/|"
+    r"favicon|placeholder|default-?(image|thumb))"
+)
+
+
+def _image_of(node) -> str:
+    """Best image shipped alongside a feed item, or "".
+
+    Probed live across all 22 feeds: 9 carry an image inline, and they use four
+    different carriers — <enclosure>, media:content, media:thumbnail, and a bare
+    <img> inside the HTML description. Checking only one of them (the usual
+    mistake) finds art for Wired but not VentureBeat, or the reverse.
+    """
+    for tag, attr in (("enclosure", "url"),
+                      (_MEDIA + "content", "url"),
+                      (_MEDIA + "thumbnail", "url")):
+        for el in node.findall(tag):
+            url = el.get(attr) or ""
+            kind = (el.get("type") or "") + (el.get("medium") or "")
+            if url.startswith("http") and ("image" in kind or tag.endswith("thumbnail")):
+                if not _JUNK_IMAGE.search(url):
+                    return url
+    # <img> embedded in description/content HTML (Meta, The Verge, Simon Willison)
+    blob = "".join(node.itertext())
+    for m in re.finditer(r'<img[^>]+src="(https?://[^"]+)"', blob):
+        if not _JUNK_IMAGE.search(m.group(1)):
+            return m.group(1)
+    return ""
+
+
 def fetch_feed(feed: dict, cutoff: datetime) -> list[Story]:
     try:
         req = urllib.request.Request(feed["url"], headers={"User-Agent": config.USER_AGENT})
@@ -143,12 +184,45 @@ def fetch_feed(feed: dict, cutoff: datetime) -> list[Story]:
         out.append(Story(
             title_en=title, url=url, source=feed["name"],
             source_fa=feed.get("fa", feed["name"]), tier=feed.get("tier", 2),
-            published=published, summary_en=summary,
+            published=published, summary_en=summary, image=_image_of(node),
         ))
     return out
 
 
+_OG_IMAGE = (
+    r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)',
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image',
+    r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)',
+)
+
+
+def _og_image_from(html: str, page_url: str) -> str:
+    """og:image of an already-downloaded page, or "".
+
+    Probed live: 9 of 22 feeds ship an image inline, and og:image recovers art
+    for 8 of the remaining 13 (DeepMind, Hugging Face, Mistral, Microsoft, MIT
+    Tech Review, TechCrunch, Stratechery, Sequoia). arXiv only offers its own
+    site logo, which is worse than no picture, so relative URLs are dropped
+    rather than resolved.
+    """
+    for pattern in _OG_IMAGE:
+        m = re.search(pattern, html, re.I)
+        if not m:
+            continue
+        url = m.group(1).strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        if url.startswith("http") and not _JUNK_IMAGE.search(url):
+            return url
+    return ""
+
+
 def fetch_article(url: str, limit: int = 2500) -> str:
+    """Readable body of an article (see :func:`fetch_article_and_image`)."""
+    return fetch_article_and_image(url, limit)[0]
+
+
+def fetch_article_and_image(url: str, limit: int = 2500) -> tuple[str, str]:
     """Pull the readable body of an article.
 
     Vendor blogs (OpenAI, DeepMind, Mistral) frequently ship an empty or
@@ -156,19 +230,22 @@ def fetch_article(url: str, limit: int = 2500) -> str:
     restate the headline, so the "key facts" degenerate into filler like
     "published by DeepMind". Fetching the page gives the model real material.
 
-    Best-effort by design — any failure returns "" and the caller falls back to
-    the feed summary.
+    Best-effort by design — any failure returns ("", "") and the caller falls
+    back to the feed summary. The og:image is harvested from the SAME response,
+    so illustrating a story costs no extra HTTP request.
     """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": config.USER_AGENT})
         raw = urllib.request.urlopen(req, timeout=20).read()
     except Exception:
-        return ""
+        return "", ""
 
     try:
         text = raw.decode("utf-8", "replace")
     except Exception:
-        return ""
+        return "", ""
+
+    image = _og_image_from(text, url)
 
     # Drop the parts of the DOM that never contain article prose.
     text = re.sub(r"(?is)<(script|style|nav|header|footer|aside|form|noscript)[^>]*>.*?</\1>",
@@ -191,7 +268,7 @@ def fetch_article(url: str, limit: int = 2500) -> str:
         parts.append(cleaned)
         if sum(len(x) for x in parts) > limit:
             break
-    return " ".join(parts)[:limit]
+    return " ".join(parts)[:limit], image
 
 
 _STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",

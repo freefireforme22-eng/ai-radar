@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import config, llm
-from .sources import Story, fetch_article
+from .sources import Story, fetch_article_and_image
 
 SYSTEM = (
     "تو سردبیر یک کانال خبری فارسی‌زبان در حوزه هوش مصنوعی هستی. "
@@ -315,10 +317,14 @@ def _localise_one(story: Story) -> Story | None:
     # Vendor blogs (OpenAI, DeepMind) often publish an empty RSS description.
     # Without body text the model can only restate the headline, which is how
     # the preview ended up with a single filler fact ("published by DeepMind").
-    if len(body) < 220:
-        fetched = fetch_article(story.url)
+    # The same fetch also yields the page's og:image, so a story that arrived
+    # without art in its feed still gets illustrated for free.
+    if len(body) < 220 or not story.image:
+        fetched, image = fetch_article_and_image(story.url)
         if len(fetched) > len(body):
             body = fetched
+        if image and not story.image:
+            story.image = image
     body = (body or story.title_en)[:1800]
     prompt = STORY_PROMPT.format(title=story.title_en, source=story.source, body=body)
 
@@ -401,7 +407,48 @@ def _fa_digits(text: str) -> str:
 def localise(stories: list[Story], workers: int = 4) -> list[Story]:
     with ThreadPoolExecutor(max_workers=workers) as ex:
         results = list(ex.map(_localise_one, stories))
-    return [s for s in results if s is not None]
+    ready = [s for s in results if s is not None]
+    verify_images(ready, workers=workers)
+    return ready
+
+
+# Telegram fetches a photo URL server-side, and a single unfetchable one fails
+# the WHOLE sendRichMessage call ("Bad Request: failed to get HTTP URL content")
+# — one dead CDN link would silence the entire bulletin, which is precisely how
+# a channel dies quietly. Measured on live feeds: 1 of 12 real image URLs was
+# unusable (a Google CMS link served application/octet-stream, and Wired's
+# media host answered 500 for a URL that had worked hours earlier).
+_MAX_IMAGE_BYTES = 9 * 1024 * 1024   # Telegram's own limit for photo-by-URL
+
+
+def _image_is_usable(url: str) -> bool:
+    """Fetch enough of the URL to prove Telegram will accept it."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": config.USER_AGENT})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            if resp.status != 200:
+                return False
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+            if not ctype.startswith("image/"):
+                return False
+            length = int(resp.headers.get("Content-Length") or 0)
+            if length and length > _MAX_IMAGE_BYTES:
+                return False
+            return bool(resp.read(1))
+    except Exception:
+        return False
+
+
+def verify_images(stories: list[Story], workers: int = 4) -> None:
+    """Drop any image URL that Telegram would choke on. Mutates in place."""
+    targets = [s for s in stories if s.image]
+    if not targets:
+        return
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        verdicts = list(ex.map(lambda s: _image_is_usable(s.image), targets))
+    for story, ok in zip(targets, verdicts):
+        if not ok:
+            story.image = ""
 
 
 DIGEST_PROMPT = """این تیترهای فارسی بولتن امروز است. یک جمع‌بندی فارسی در دو جمله بنویس

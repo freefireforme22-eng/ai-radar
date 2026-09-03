@@ -102,6 +102,20 @@ def main(argv: list[str] | None = None) -> int:
         log(f"posted message_id={mid} ({kind})")
     except telegram.TelegramError as e:
         log(f"rich send failed: {e}")
+        # A photo URL that Telegram cannot fetch fails the whole call even
+        # though every word of the bulletin is fine. Retry once without any
+        # images before giving up on the rich format — losing the pictures is a
+        # far smaller loss than dropping to plain text.
+        if kind == "rich" and any(s.image for s in ready):
+            log("retrying without images...")
+            for s in ready:
+                s.image = ""
+            try:
+                mid = telegram.send_rich(render.build(ready, summary), target)
+                log(f"posted message_id={mid} (rich, images dropped)")
+                return _save_state(args, ready, seen)
+            except telegram.TelegramError as e2:
+                log(f"image-free retry also failed: {e2}")
         log("falling back to plain text...")
         mid = telegram.send_text(telegram.plain_fallback(ready, summary), target)
         log(f"posted message_id={mid} (plain fallback)")
@@ -112,6 +126,18 @@ def main(argv: list[str] | None = None) -> int:
             seen[s.fingerprint] = now
         save_seen(seen)
         log(f"state saved ({len(seen)} fingerprints)")
+    return 0
+
+
+def _save_state(args, ready, seen) -> int:
+    """Record the published fingerprints (skipped for previews)."""
+    if args.preview:
+        return 0
+    now = int(datetime.now(timezone.utc).timestamp())
+    for s in ready:
+        seen[s.fingerprint] = now
+    save_seen(seen)
+    print(f"state saved ({len(seen)} fingerprints)", flush=True)
     return 0
 
 

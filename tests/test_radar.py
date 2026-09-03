@@ -337,3 +337,215 @@ def test_boundary_still_protects_ordinary_words():
     for word in ("پرونده قضایی", "پرونده\u200cهای حقوقی", "فلشبک",
                  "کلادسازی", "میسترالی", "حافظه فلش"):
         assert _repair_translit(word) == word, word
+
+
+# ── Telegram's server-side linkifier ─────────────────────────────────────
+def test_feed_category_is_not_turned_into_a_dead_link():
+    """Live post #98 shipped a table cell reading "arXiv cs.AI"; Telegram
+    rewrote it into a link whose href was the literal string "cs.AI" — a dead
+    link, because .AI is a real ccTLD. Probed live: .LG is not a TLD, so only
+    one of three arXiv rows broke, which is how it survived review."""
+    from radar import render
+    out = render.no_autolink("arXiv cs.AI")
+    assert out == "arXiv cs.\u2060AI"
+    assert "cs.AI" not in out
+
+
+def test_no_autolink_leaves_persian_and_versions_alone():
+    from radar import render
+    assert render.no_autolink("\u0646\u0633\u062e\u0647 \u06f0.\u06f3\u06f4") == "\u0646\u0633\u062e\u0647 \u06f0.\u06f3\u06f4"
+    assert render.no_autolink("GPT-4.5") == "GPT-4.5"          # digits after the dot
+    assert render.no_autolink("Qwen3-4B") == "Qwen3-4B"        # no dot at all
+
+
+def test_no_autolink_never_touches_a_deliberate_link_label():
+    from radar import render
+    link = render.link("cs.AI docs", "https://arxiv.org/list/cs.AI/recent")
+    assert render.no_autolink(link) == link
+
+
+def test_build_neutralises_host_shapes_everywhere_in_the_tree():
+    """One call at the end of build() must cover table cells, checklist facts
+    and the source index alike — not just the cell where it was first seen."""
+    import json
+    from datetime import datetime, timezone
+    from radar import render
+    from radar.sources import Story
+    s = Story(title_en="x", url="https://arxiv.org/abs/1", source="arXiv cs.AI",
+              source_fa="\u0622\u0631\u06a9\u0627\u06cc\u0648",
+              published=datetime.now(timezone.utc), summary_en="y", tier=3)
+    s.title_fa = "\u0639\u0646\u0648\u0627\u0646"
+    s.summary_fa = "\u062e\u0644\u0627\u0635\u0647"
+    s.why_fa = ""
+    s.facts = ["\u0646\u06a9\u062a\u0647 cs.AI"]
+    s.score = 9
+    s.section = "models"
+    s.also_seen_in = []
+    raw = json.dumps(render.build([s], ""), ensure_ascii=False)
+    assert "cs.\u2060AI" in raw
+    import re
+    assert not re.search(r"cs\.(?!\u2060)AI", raw)
+
+
+# ── photos ────────────────────────────────────────────────────────────────
+def test_photo_block_uses_the_inputmedia_shape():
+    """Probed live: {"photo": "<url>"} fails with 'Field "photo" must be of type
+    Object', {"photo":{"url":...}} with 'Can't find field "type"', and
+    {"type":"photo","url":...} with 'media not found'. Only ``media`` works."""
+    from radar import render
+    b = render.photo("https://example.com/a.jpg")
+    assert b == {"type": "photo",
+                 "photo": {"type": "photo", "media": "https://example.com/a.jpg"}}
+
+
+def test_photo_caption_must_be_an_object():
+    """A bare string caption is rejected with 'RichBlockCaption must be an
+    object', so the helper wraps plain text for the caller."""
+    from radar import render
+    assert render.photo("u", caption="\u0634\u0631\u062d")["caption"] == {"text": "\u0634\u0631\u062d"}
+    rich = {"text": [{"type": "bold", "text": "x"}]}
+    assert render.photo("u", caption=rich)["caption"] == rich
+
+
+def test_photo_url_survives_the_autolink_guard():
+    """no_autolink must not corrupt the media URL — 'example.com' inside a photo
+    block is a real address, not prose."""
+    import json
+    from radar import render
+    raw = json.dumps(render.no_autolink(render.photo("https://cdn.example.com/a.jpg")))
+    assert "https://cdn.example.com/a.jpg" in raw
+
+
+def test_lead_image_is_not_repeated_inside_its_own_story():
+    from datetime import datetime, timezone
+    from radar import render
+    from radar.sources import Story
+    def mk(title, img):
+        s = Story(title_en="x", url=f"https://x/{title}", source="Wired",
+                  source_fa="\u0648\u0627\u06cc\u0631\u062f", tier=2,
+                  published=datetime.now(timezone.utc), summary_en="y")
+        s.title_fa = title
+        s.summary_fa = "\u062e\u0644\u0627\u0635\u0647"
+        s.section = "models"
+        s.score = 8
+        s.image = img
+        return s
+    stories = [mk("\u0627\u0648\u0644", "https://img/1.jpg"), mk("\u062f\u0648\u0645", "https://img/2.jpg")]
+    payload = render.build(stories, "")
+    import json
+    raw = json.dumps(payload)
+    assert raw.count("https://img/1.jpg") == 1, "lead image duplicated inside its story"
+    assert raw.count("https://img/2.jpg") == 1
+
+
+# ── image validation (a dead URL kills the whole bulletin) ─────────────────
+def test_verify_images_drops_unusable_urls(monkeypatch):
+    """Telegram fetches photo URLs server-side and fails the ENTIRE
+    sendRichMessage call on one bad link ('failed to get HTTP URL content').
+    Measured live: 1 of 12 real feed images was unfetchable."""
+    from datetime import datetime, timezone
+    from radar import enrich
+    from radar.sources import Story
+    def mk(img):
+        return Story(title_en="t", url="https://x", source="s", source_fa="s",
+                     tier=2, published=datetime.now(timezone.utc), image=img)
+    good, bad = mk("https://ok/a.jpg"), mk("https://dead/b.jpg")
+    monkeypatch.setattr(enrich, "_image_is_usable", lambda u: u.startswith("https://ok"))
+    enrich.verify_images([good, bad])
+    assert good.image == "https://ok/a.jpg"
+    assert bad.image == ""
+
+
+def test_image_validator_rejects_non_image_content_type(monkeypatch):
+    """The Google CMS URL that broke a real send answered 200 with
+    application/octet-stream, so status alone is not enough."""
+    from radar import enrich
+
+    class FakeResp:
+        status = 200
+        headers = {"Content-Type": "application/octet-stream", "Content-Length": "7000"}
+        def read(self, n): return b"x"
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(enrich.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    assert enrich._image_is_usable("https://storage.googleapis.com/x.webp") is False
+
+
+# ── feed image extraction ─────────────────────────────────────────────────
+def test_image_of_reads_all_four_carriers():
+    """Probed live across 22 feeds: enclosure (VentureBeat), media:content
+    (NVIDIA, Ars), media:thumbnail (Wired) and <img> in the description (Meta,
+    The Verge). Checking only one carrier finds art for some and misses others."""
+    import xml.etree.ElementTree as ET
+    from radar import sources
+    MEDIA = "http://search.yahoo.com/mrss/"
+
+    enc = ET.fromstring('<item><enclosure url="https://a/1.jpg" type="image/jpeg"/></item>')
+    assert sources._image_of(enc) == "https://a/1.jpg"
+
+    mc = ET.fromstring(f'<item xmlns:media="{MEDIA}">'
+                       f'<media:content url="https://a/2.jpg" medium="image"/></item>')
+    assert sources._image_of(mc) == "https://a/2.jpg"
+
+    th = ET.fromstring(f'<item xmlns:media="{MEDIA}">'
+                       f'<media:thumbnail url="https://a/3.jpg"/></item>')
+    assert sources._image_of(th) == "https://a/3.jpg"
+
+    desc = ET.fromstring('<item><description>'
+                         '&lt;img src="https://a/4.jpg"&gt;</description></item>')
+    assert sources._image_of(desc) == "https://a/4.jpg"
+
+
+def test_image_of_skips_tracking_pixels():
+    import xml.etree.ElementTree as ET
+    from radar import sources
+    node = ET.fromstring('<item><description>'
+                         '&lt;img src="https://feeds.feedburner.com/~ff/pixel.gif"&gt;'
+                         '&lt;img src="https://cdn/real-photo.jpg"&gt;</description></item>')
+    assert sources._image_of(node) == "https://cdn/real-photo.jpg"
+
+
+def test_og_image_recovers_art_for_feeds_without_inline_images():
+    """og:image covers 8 of the 13 feeds that ship no inline image."""
+    from radar import sources
+    html = '<meta property="og:image" content="https://cdn/og.jpg">'
+    assert sources._og_image_from(html, "https://x") == "https://cdn/og.jpg"
+    # protocol-relative
+    assert sources._og_image_from('<meta property="og:image" content="//cdn/og.png">',
+                                 "https://x") == "https://cdn/og.png"
+    # arXiv offers only a relative path to its own logo — worse than no image
+    assert sources._og_image_from(
+        '<meta property="og:image" content="/static/arxiv-logo-fb.png">', "https://x") == ""
+
+
+def test_fetch_article_keeps_its_string_signature():
+    """enrich still calls fetch_article() in places; it must stay str-returning
+    while the new tuple-returning variant does the work."""
+    from radar import sources
+    import inspect
+    assert "tuple" in inspect.signature(sources.fetch_article_and_image).return_annotation
+
+
+def test_junk_filter_drops_site_logos_from_any_path_position():
+    """A real dry-run illustrated two different arXiv papers with
+    static.arxiv.org/icons/twitter/arxiv-logo-twitter-square.png — the site's own
+    card badge. The first version of the filter only matched a logo immediately
+    before the extension, so it let this through and two distinct stories looked
+    like duplicates."""
+    from radar import sources
+    junk = [
+        "https://static.arxiv.org/icons/twitter/arxiv-logo-twitter-square.png",
+        "https://site.com/assets/logo.svg",
+        "https://site.com/img/favicon-256.png",
+        "https://feeds.feedburner.com/~ff/pixel.gif",
+    ]
+    art = [
+        "https://media.wired.com/photos/abc/master/pass/Security_Flock.jpg",
+        "https://wp.technologyreview.com/wp-content/uploads/2026/08/MITTRI.jpg",
+        "https://cdn.example.com/2026/09/deep-learning-chip.jpg",
+    ]
+    for u in junk:
+        assert sources._JUNK_IMAGE.search(u), u
+    for u in art:
+        assert not sources._JUNK_IMAGE.search(u), u
