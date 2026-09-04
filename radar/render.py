@@ -9,11 +9,26 @@ re-probed live because the docs and the server disagree in places:
     expandable_blockquote pullquote collage slideshow map anchor buttons
     mathematical_expression thinking   (`thinking` is draft-only)
 
+    23 of the 24 are now PUBLISHED by this bulletin. `thinking` is the only
+    unreachable one: the server answers RICH_MESSAGE_BLOCK_UNSUPPORTED to every
+    shape of it (text, blocks, bare), re-probed after the heading bug below was
+    fixed, so the rejection is real rather than a probe artefact.
+
     RichText entities: bold italic underline strikethrough spoiler code marked
     subscript superscript url mention hashtag cashtag bot_command custom_emoji
     anchor_link reference reference_link date_time mathematical_expression
 
 Traps found by probing, each of which silently degrades the message:
+
+* **A malformed block makes an UNRELATED block look unsupported.** Telegram
+  names a missing field without saying which block owns it, so a probe that
+  hand-wrote `{"type":"heading","heading":{...}}` (instead of the correct
+  `{"type":"heading","text":...,"size":n}`) got
+  `can't parse InputRichBlock: Can't find field "size"` and the media block
+  after it was written off as unsupported. `video` and `document` were both
+  declared "inherently unreachable" for three rounds on that evidence; re-probed
+  with the right heading — and with no heading at all — both store fine. Probe
+  each block ALONE before concluding anything about it.
 
 * Ordered lists key off ``item["type"]`` ("1", "a", "A", "i", "I") — NOT
   ``label_type``. An unknown field is accepted and dropped, so a numbered list
@@ -170,6 +185,42 @@ def animation(file_id, caption=None, autoplay=True):
     valid later block look unsupported.
     """
     block = {"type": "animation", "animation": {"type": "animation", "media": file_id}}
+    if caption:
+        block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
+    return block
+
+
+def video(file_id, caption=None):
+    """A video block — the only block a reader can WATCH.
+
+    Written off as unreachable for three rounds on the strength of a broken
+    probe: the probe hand-wrote its heading as `{"type":"heading","heading":{…}}`
+    instead of this module's own `heading()` schema, so the server's
+    `can't parse InputRichBlock: Can't find field "size"` was about the HEADING
+    and got read as "video is unsupported". Re-probed with `heading()` and with
+    no heading at all — Telegram stored `types=['video']` with width, height,
+    duration and a server-generated thumbnail, and a `caption` survives.
+
+    `media` takes a `file_id` like `photo`/`audio`/`animation`, so no public
+    hosting is needed; mint the id with `telegram.upload_video`. Unlike
+    `animation`, this block keeps its AUDIO track, which is the whole point —
+    it carries the narrated edition as something visible.
+    """
+    block = {"type": "video", "video": {"type": "video", "media": file_id}}
+    if caption:
+        block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
+    return block
+
+
+def document(file_id, caption=None):
+    """A document block — mis-diagnosed as unsupported by the same broken probe.
+
+    Stored shape confirmed live:
+    `{"type": "document", "document": {"file_name": …, "mime_type": …}}`, caption
+    intact.
+    """
+    block = {"type": "document",
+             "document": {"type": "document", "media": file_id}}
     if caption:
         block["caption"] = caption if isinstance(caption, dict) else {"text": caption}
     return block
@@ -338,32 +389,32 @@ _THEMES = [
     {"mark": "🛰", "accent": "primary", "digest": "pullquote",
      "rule": "▬▬▬▬▬", "glance": "⚡️", "gallery": "collage",
      "voice": "fa-IR-DilaraNeural", "narration": "voice_note",
-     "board_size": 5,
+     "board_size": 5, "dossier": False,
      "layout": ("hero", "digest", "audio", "motion", "nav", "board", "gallery")},
     {"mark": "🌐", "accent": "success", "digest": "blockquote",
      "rule": "◈ ◈ ◈", "glance": "🎯", "gallery": "slideshow",
-     "voice": "fa-IR-FaridNeural", "narration": "audio",
-     "board_size": 4,
+     "voice": "fa-IR-FaridNeural", "narration": "video",
+     "board_size": 4, "dossier": True,
      "layout": ("digest", "hero", "board", "motion", "audio", "nav", "gallery")},
     {"mark": "🧭", "accent": "danger", "digest": "expandable",
      "rule": "━━━━━", "glance": "📌", "gallery": "collage",
      "voice": "fa-IR-FaridNeural", "narration": "voice_note",
-     "board_size": 5,
+     "board_size": 5, "dossier": False,
      "layout": ("hero", "board", "digest", "gallery", "audio", "motion", "nav")},
     {"mark": "🔭", "accent": "link", "digest": "pullquote",
      "rule": "✦ ✦ ✦", "glance": "🗞", "gallery": "slideshow",
      "voice": "fa-IR-DilaraNeural", "narration": "audio",
-     "board_size": 3,
+     "board_size": 3, "dossier": True,
      "layout": ("audio", "hero", "motion", "digest", "board", "gallery", "nav")},
     {"mark": "📡", "accent": "success", "digest": "expandable",
      "rule": "⋄ ⋄ ⋄ ⋄", "glance": "🔎", "gallery": "collage",
-     "voice": "fa-IR-DilaraNeural", "narration": "voice_note",
-     "board_size": 4,
+     "voice": "fa-IR-DilaraNeural", "narration": "video",
+     "board_size": 4, "dossier": False,
      "layout": ("motion", "board", "hero", "digest", "audio", "gallery", "nav")},
     {"mark": "🛠", "accent": "primary", "digest": "blockquote",
      "rule": "═════", "glance": "🧩", "gallery": "slideshow",
      "voice": "fa-IR-FaridNeural", "narration": "audio",
-     "board_size": 5,
+     "board_size": 5, "dossier": True,
      "layout": ("hero", "audio", "board", "gallery", "motion", "digest", "nav")},
 ]
 
@@ -457,13 +508,23 @@ def current_voice() -> str:
 
 
 def current_narration_kind() -> str:
-    """Whether this slot narrates as a voice bubble or an audio attachment.
+    """Whether this slot narrates as a voice bubble, an audio row, or a video.
 
     Exposed for the same reason as `theme_index`: the upload has to know the kind
     BEFORE the payload is built, because a voice note needs an OGG/Opus transcode
-    and a different send method.
+    and a different send method, and a video needs the cards drawn first so they
+    can be encoded into it.
     """
     return _theme(_tehran_now()).get("narration", "audio")
+
+
+def current_dossier() -> bool:
+    """Whether this slot also attaches the PDF dossier (`document` block).
+
+    Not every post: a block that appears on all of them stops being a feature
+    and becomes wallpaper — the same reason the BibTeX citation cards are capped.
+    """
+    return bool(_theme(_tehran_now()).get("dossier", False))
 
 
 def section_counts(stories: list[Story]) -> list[tuple[str, int]]:
@@ -478,12 +539,22 @@ def section_counts(stories: list[Story]) -> list[tuple[str, int]]:
     return [(label, tally[key]) for key, label in config.SECTIONS if tally.get(key)]
 
 
-def story_card_specs(stories: list[Story]) -> list[tuple[int, dict]]:
-    """(index, kwargs) for every story that needs a DRAWN card.
+def story_card_specs(stories: list[Story],
+                     include_art: bool = False) -> list[tuple[int, dict]]:
+    """(index, kwargs) for the stories that need a DRAWN card.
 
-    Only stories with no feed art get one: real photography always wins. The
-    index is the position in `stories`, so the caller can attach the uploaded
-    file_id back to the right story without matching on text.
+    By default only stories with no feed art get one: real photography always
+    wins inside the post. The index is the position in `stories`, so the caller
+    can attach the uploaded file_id back to the right story without matching on
+    text.
+
+    `include_art=True` returns EVERY story instead. That exists for the
+    watchable edition and the PDF dossier, which need a frame per story rather
+    than per art-less story. MEASURED FAILURE that forced the parameter: a probe
+    on a bulletin whose eight stories all carried feed art drew zero cards, so
+    the video was one static cover held for 61 seconds of narration — the "dry"
+    complaint reincarnated as a slideshow. The extra cards are used as frames
+    only; they are never attached to a story that already has a photograph.
 
     Lives here, next to `build`, because the rank shown on the card must be the
     same rank the bulletin numbers the story with — computed from the same list
@@ -492,7 +563,7 @@ def story_card_specs(stories: list[Story]) -> list[tuple[int, dict]]:
     labels = dict(config.SECTIONS)
     out: list[tuple[int, dict]] = []
     for i, s in enumerate(stories):
-        if s.image:
+        if s.image and not include_art:
             continue
         metric = (f"{s.metric_label}: {s.metric_value}"
                   if s.metric_label and s.metric_value else "")
@@ -529,7 +600,7 @@ def cover_meta(stories: list[Story]) -> dict:
 # ── the bulletin ─────────────────────────────────────────────────────────
 def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
           cover_id: str = "", motion_id: str = "",
-          narration_kind: str = "audio") -> dict:
+          narration_kind: str = "audio", dossier_id: str = "") -> dict:
     now = _tehran_now()
     clock = f"{now.hour:02d}:{now.minute:02d}".translate(_DIGITS)
     th = _theme(now)
@@ -580,11 +651,23 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
     # a voice bubble are two different reading experiences and using only one
     # forever is the monotony this whole rotation exists to break.
     if narration_id:
-        as_voice = narration_kind == "voice_note"
-        maker = voice_note if as_voice else audio
-        label = "🎙 روایت صوتی این بولتن" if as_voice else "🎧 روایت صوتی این بولتن"
+        # Three carriers, not two. The narration is the same voice either way;
+        # what changes is how it READS in the channel — an attachment row, a
+        # spoken bubble, or a watchable card sequence. Sending more than one
+        # carrier in a single post would be the same narration twice, which is
+        # the "block becomes wallpaper" failure the citation cap exists for, so
+        # the theme picks exactly one.
+        makers = {"voice_note": voice_note, "video": video, "audio": audio}
+        maker = makers.get(narration_kind, audio)
+        labels = {"voice_note": "🎙 روایت صوتی این بولتن",
+                  "video": "🎬 نسخه تماشایی این بولتن",
+                  "audio": "🎧 روایت صوتی این بولتن"}
+        subs = {"voice_note": "خوانده‌شده به فارسی",
+                "video": "کارت‌های خبر با روایت فارسی",
+                "audio": "خوانده‌شده به فارسی"}
         seg["audio"] = [maker(narration_id, caption={"text": [
-            bold(label), "  ·  ", italic("خوانده‌شده به فارسی")]})]
+            bold(labels.get(narration_kind, labels["audio"])), "  ·  ",
+            italic(subs.get(narration_kind, subs["audio"]))]})]
 
     # The animated chart: the only MOVING element in the post, and the only one
     # that shows the bulletin's composition at a glance instead of describing it.
@@ -686,6 +769,17 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
         first = False
 
     blocks.append(divider())
+
+    # The PDF dossier: every drawn card as one page, so the bulletin is something
+    # a reader can keep. Placed at TOP LEVEL beside the sources toggle rather than
+    # inside it — a `document` buried in a collapsed toggle is the same invisible
+    # -art mistake that made an earlier post read as «هیچ عکسی نیست». Only on
+    # `dossier` themes, and only when the encode and upload both worked.
+    if dossier_id:
+        blocks.append(document(dossier_id, caption={"text": [
+            bold("🗄 پروندهٔ کامل این بولتن (PDF)"), "  ·  ",
+            italic("یک صفحه برای هر خبر، برای خواندن آفلاین")]}))
+
     blocks.append(details([bold("🗂 منابع این بولتن"), "  ",
                            italic("شمار خبر هر منبع")], [
         table([["منبع", "خبر"]] + [[src, f"{n}".translate(_DIGITS)]

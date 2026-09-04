@@ -83,6 +83,8 @@ def _upload(path: str, field: str, filename: str, mime: str,
     method = {"audio": "sendAudio",
               "voice": "sendVoice",
               "animation": "sendAnimation",
+              "video": "sendVideo",
+              "document": "sendDocument",
               "photo": "sendPhoto"}[field]
     url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{method}"
     req = urllib.request.Request(
@@ -177,6 +179,54 @@ def upload_voice(path: str, chat_id: str | int | None = None) -> str:
     """
     result = _upload(path, "voice", "narration.ogg", "audio/ogg", chat_id)
     file_id = (result.get("voice") or {}).get("file_id", "")
+    try:
+        delete(result["message_id"], chat_id or config.CHANNEL_ID)
+    except Exception:
+        pass
+    return file_id
+
+
+def upload_video(path: str, chat_id: str | int | None = None) -> str:
+    """Upload an MP4 WITH AN AUDIO TRACK and return its `video` file_id.
+
+    Why this exists at all: a rich `video` block was written off as
+    "inherently unreachable" for two rounds. That verdict came from a BROKEN
+    PROBE, not from the server. The probe hand-wrote its heading as
+    `{"type": "heading", "heading": {...}}` — the codebase's own proven schema
+    is `{"type": "heading", "text": ..., "size": n}` — so Telegram answered
+    `can't parse InputRichBlock: Can't find field "size"` about the HEADING,
+    and the message was read as "video is unsupported". Re-probed with
+    `render.heading()` and, decisively, with NO heading at all: the server
+    stored `types=['video']` with width/height/duration/thumbnail intact.
+    `document` was mis-diagnosed the same way. The lesson is written into
+    `motion.py`'s docstring already — an invalid block ANYWHERE in the array
+    makes an unrelated block look rejected — and this function is what it costs
+    to ignore it.
+
+    A `video` is not an `animation`: `sendAnimation` strips audio, so the
+    narrated edition can only ride on `sendVideo`.
+    """
+    result = _upload(path, "video", "briefing.mp4", "video/mp4", chat_id,
+                     supports_streaming="true")
+    file_id = (result.get("video") or {}).get("file_id", "")
+    try:
+        delete(result["message_id"], chat_id or config.CHANNEL_ID)
+    except Exception:
+        pass
+    return file_id
+
+
+def upload_document(path: str, chat_id: str | int | None = None,
+                    *, filename: str = "radar.pdf",
+                    mime: str = "application/pdf") -> str:
+    """Upload a file and return its `document` file_id.
+
+    Same mis-diagnosis story as `upload_video`. The stored block came back as
+    `{"type": "document", "document": {"file_name": ..., "mime_type": ...}}`
+    and a `caption` on it SURVIVES.
+    """
+    result = _upload(path, "document", filename, mime, chat_id)
+    file_id = (result.get("document") or {}).get("file_id", "")
     try:
         delete(result["message_id"], chat_id or config.CHANNEL_ID)
     except Exception:

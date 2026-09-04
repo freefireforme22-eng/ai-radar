@@ -14,7 +14,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from . import audio, card, config, enrich, motion, render, sources, telegram
+from . import (audio, briefing, card, config, enrich, motion, render, sources,
+               telegram)
 
 
 def load_seen() -> dict:
@@ -71,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the animated chart (faster; no GIF render or upload)")
     ap.add_argument("--lookback-fixed", action="store_true",
                     help="never widen the window, even if too few stories are fresh")
+    ap.add_argument("--theme", type=int, metavar="N",
+                    help="force a visual theme (0-5) instead of the rotation; "
+                         "for probing a specific slot's blocks without waiting "
+                         "six bulletins for it to come round")
     ap.add_argument("--save-payload", metavar="PATH", help="write the rich payload as JSON")
     args = ap.parse_args(argv)
 
@@ -85,7 +90,13 @@ def main(argv: list[str] | None = None) -> int:
     # CI, manual dispatches and the 2-hourly safety net all land inside one slot.
     # Previews are excluded so a probe cannot rob the channel of a step.
     rotation = -1
-    if not args.dry_run and not args.preview:
+    if args.theme is not None:
+        # Explicit override, for probing one slot's blocks on demand. Does NOT
+        # touch the persisted counter, so a probe cannot shift the channel's
+        # rotation.
+        render.set_rotation(args.theme)
+        log(f"visual theme {args.theme % render.theme_count()} (forced by --theme)")
+    elif not args.dry_run and not args.preview:
         rotation = (load_rotation() + 1) % render.theme_count()
         render.set_rotation(rotation)
         log(f"visual theme {rotation} (persisted rotation, not the clock)")
@@ -165,27 +176,48 @@ def main(argv: list[str] | None = None) -> int:
 
     # Narration is optional and must never be able to block a bulletin: any
     # failure inside `audio.narrate` returns "" and the post ships text-only.
+    #
+    # ORDER MATTERS HERE. A `video` narration cannot be uploaded until the cover
+    # and the story cards exist, because the cards ARE its frames. So on video
+    # slots only the mp3 is synthesised now and the upload is deferred until
+    # after the drawing stage; on the other slots nothing changes.
     narration_id = ""
     narration_kind = "audio"
+    narration_mp3 = ""
     if not args.plain and not args.no_audio:
-        log("synthesising the Persian narration...")
         narration_kind = render.current_narration_kind()
-        narration_id, narration_kind = audio.narrate(
-            summary, [s.title_fa for s in ready],
-            args.preview or config.CHANNEL_ID,
-            voice=render.current_voice(),
-            as_voice_note=narration_kind == "voice_note")
-        log(f"  narration attached as {narration_kind}" if narration_id
-            else "  narration unavailable — text only")
+        if narration_kind == "video" and args.no_cover:
+            # No cards will be drawn, so there is nothing to put on screen.
+            narration_kind = "audio"
+        if narration_kind == "video":
+            log("synthesising the Persian narration (for the watchable edition)...")
+            narration_mp3 = audio.synthesise(
+                audio.narration_text(summary, [s.title_fa for s in ready],
+                                     render.cover_meta(ready)["clock"]),
+                render.current_voice())
+            if not narration_mp3:
+                narration_kind = "audio"
+                log("  TTS failed — falling back to an audio block")
+        if narration_kind != "video":
+            log("synthesising the Persian narration...")
+            narration_id, narration_kind = audio.narrate(
+                summary, [s.title_fa for s in ready],
+                args.preview or config.CHANNEL_ID,
+                voice=render.current_voice(),
+                as_voice_note=narration_kind == "voice_note")
+            log(f"  narration attached as {narration_kind}" if narration_id
+                else "  narration unavailable — text only")
 
     # The cover card: the one element of the post that carries a real colour.
     # Same optional contract as the narration — a failure returns "" and the
     # bulletin ships without it rather than not shipping.
     cover_id = ""
+    cover_path = ""
     if not args.plain and not args.no_cover:
         log("drawing the cover card...")
         meta = render.cover_meta(ready)
         path = card.build(**meta)
+        cover_path = path
         if path:
             try:
                 cover_id = telegram.upload_photo(
@@ -198,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     # The animated chart: the only moving element. Same optional contract again —
     # the encode, the upload, or a missing Pillow all degrade to "" silently.
     motion_id = ""
+    dossier_id = ""
     if not args.plain and not args.no_motion:
         log("drawing the animated chart...")
         rows = render.section_counts(ready)
@@ -217,31 +250,110 @@ def main(argv: list[str] | None = None) -> int:
     # photography is never replaced. Same optional contract — a failure leaves
     # `Story.card` empty and that card ships text-only as before.
     if not args.plain and not args.no_cover:
-        specs = render.story_card_specs(ready)
+        # Two different sets. The stories that get a card ATTACHED are only the
+        # art-less ones (real photography wins in the post). The stories that get
+        # a card DRAWN include the photographed ones too, because the video and
+        # the PDF need one frame per story — measured: a bulletin where all eight
+        # stories carried feed art produced zero cards, so the "watchable" edition
+        # was a single cover frame held for 61 seconds.
+        needs_card = {idx for idx, _ in render.story_card_specs(ready)}
+        specs = render.story_card_specs(ready, include_art=True)
         drawn = 0
+        card_paths: list[str] = []
         for idx, kwargs in specs:
             path = card.build_story(**kwargs)
             if not path:
                 continue
+            card_paths.append(path)
+            if idx not in needs_card:
+                continue                  # frame only; the story has a real photo
             try:
                 ready[idx].card = telegram.upload_photo(
                     path, args.preview or config.CHANNEL_ID)
                 drawn += 1
             except Exception as e:                       # noqa: BLE001
                 log(f"  story card {kwargs['rank']} upload failed: {e}")
-            finally:
+        log(f"  {len(card_paths)} cards drawn ({drawn} attached to art-less "
+            f"stories, the rest are video/PDF frames)")
+
+        # The watchable edition and the PDF dossier both reuse the cards that
+        # were just drawn, which is why the files are kept until now instead of
+        # being deleted inside the loop.
+        pages = [p for p in ([cover_path] + card_paths) if p]
+
+        if narration_kind == "video":
+            log("encoding the watchable edition...")
+            mp4 = briefing.build(
+                frames=pages, audio_path=narration_mp3,
+                theme_index=render.theme_index(render._tehran_now()))
+            if mp4:
                 try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-        log(f"  {drawn} story cards drawn for the {len(specs)} art-less stories")
+                    narration_id = telegram.upload_video(
+                        mp4, args.preview or config.CHANNEL_ID)
+                except Exception as e:                   # noqa: BLE001
+                    log(f"  video upload failed: {e}")
+                finally:
+                    try:
+                        os.unlink(mp4)
+                    except OSError:
+                        pass
+            if narration_id:
+                log(f"  watchable edition attached ({len(pages)} cards, "
+                    f"{briefing.audio_seconds(narration_mp3):.0f}s)")
+            else:
+                # Never lose the narration: fall back to the audio block that
+                # every other slot uses rather than shipping a silent bulletin.
+                log("  video unavailable — falling back to an audio block")
+                try:
+                    narration_id = telegram.upload_audio(
+                        narration_mp3, args.preview or config.CHANNEL_ID,
+                        title="رادار هوش مصنوعی")
+                    narration_kind = "audio"
+                except Exception as e:                   # noqa: BLE001
+                    log(f"  audio fallback failed too: {e}")
+                    narration_kind = "audio"
+
+        if render.current_dossier() and pages:
+            log("building the PDF dossier...")
+            pdf = briefing.build_pdf(frames=pages)
+            if pdf:
+                try:
+                    dossier_id = telegram.upload_document(
+                        pdf, args.preview or config.CHANNEL_ID,
+                        filename="radar-bulletin.pdf")
+                except Exception as e:                   # noqa: BLE001
+                    log(f"  dossier upload failed: {e}")
+                finally:
+                    try:
+                        os.unlink(pdf)
+                    except OSError:
+                        pass
+            log(f"  dossier attached ({len(pages)} pages)" if dossier_id
+                else "  dossier unavailable — bulletin ships without it")
+
+        for p in card_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        if cover_path:
+            try:
+                os.unlink(cover_path)
+            except OSError:
+                pass
+
+    if narration_mp3:
+        try:
+            os.unlink(narration_mp3)
+        except OSError:
+            pass
 
     if args.plain:
         payload, kind = telegram.plain_fallback(ready, summary), "plain"
     else:
         payload, kind = render.build(
             ready, summary, narration_id, cover_id, motion_id,
-            narration_kind), "rich"
+            narration_kind, dossier_id), "rich"
 
     if args.save_payload:
         with open(args.save_payload, "w", encoding="utf-8") as f:
@@ -274,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 mid = telegram.send_rich(
                     render.build(ready, summary, narration_id, cover_id,
-                                 motion_id, narration_kind), target)
+                                 motion_id, narration_kind, dossier_id), target)
                 log(f"posted message_id={mid} (rich, images dropped)")
                 return _save_state(args, ready, seen, rotation)
             except telegram.TelegramError as e2:

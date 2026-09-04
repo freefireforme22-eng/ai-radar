@@ -58,6 +58,11 @@ jobs:
       # this runner nor the server has a system ffmpeg, so the encoder comes from
       # this wheel's bundled static binary. Optional like the cover: no wheel
       # means a GIF fallback, and a failure means a bulletin with no chart.
+      #
+      # The same wheel encodes the WATCHABLE edition (radar/briefing.py): the
+      # drawn cards timed to the Persian narration, uploaded as a rich `video`
+      # block. That needs libx264 + aac from this binary; without the wheel the
+      # video slot falls back to an audio block instead of failing.
       - name: Install animation encoder
         run: pip install --quiet imageio-ffmpeg==0.5.1
 

@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radar import card, config, llm, motion, render, sources  # noqa: E402
+import pytest  # noqa: E402
+
+from radar import (briefing, card, config, llm, motion, render,  # noqa: E402
+                   sources, telegram)
 from radar import run as run_mod  # noqa: E402
 from radar.sources import Story  # noqa: E402
 
@@ -1804,20 +1807,27 @@ def test_short_points_are_left_to_the_other_gates():
 
 
 def test_narration_block_kind_rotates_with_the_theme():
-    """A voice bubble and an audio attachment are two different reading
-    experiences; using only one forever is the monotony the rotation exists to
-    break. Both kinds must be reachable, and the block type must follow the
-    theme's declared kind — not the other way round."""
+    """A voice bubble, an audio attachment and a watchable video are three
+    different reading experiences; using only one forever is the monotony the
+    rotation exists to break. Every kind must be reachable, and the block type
+    must follow the theme's declared kind — not the other way round.
+
+    `video` joined this set only after the earlier "video is unsupported"
+    verdict was traced to a broken probe (a hand-written heading missing its
+    required `size`), not to the server."""
     kinds = {t.get("narration", "audio") for t in render._THEMES}
-    assert kinds == {"audio", "voice_note"}, kinds
+    assert kinds == {"audio", "voice_note", "video"}, kinds
 
     stories = [_story_ready()]
-    for kind, expected in (("voice_note", "voice_note"), ("audio", "audio")):
+    others = {"voice_note", "audio", "video"}
+    for kind in ("voice_note", "audio", "video"):
         payload = render.build(stories, "جمع‌بندی", narration_id="FILEID",
                                narration_kind=kind)
         types = [b["type"] for b in payload["blocks"]]
-        assert expected in types, (kind, types)
-        assert ("audio" if expected == "voice_note" else "voice_note") not in types
+        assert kind in types, (kind, types)
+        # exactly ONE carrier per post: the same narration twice is wallpaper
+        for wrong in others - {kind}:
+            assert wrong not in types, (kind, wrong, types)
 
 
 def test_voice_note_keeps_its_caption():
@@ -1972,3 +1982,179 @@ def test_rotation_survives_a_round_trip_through_disk(tmp_path, monkeypatch):
     assert run_mod.load_rotation() == -1        # corrupt file must not crash
     run_mod.save_rotation(render.theme_count() + 1)
     assert run_mod.load_rotation() == 1         # wraps modulo the theme count
+
+
+# ── the watchable edition + the dossier (blocks written off as unreachable) ───
+def test_video_and_document_blocks_have_the_probed_shape():
+    """Both were declared "inherently unreachable" for three rounds. The verdict
+    came from a probe that hand-wrote its heading as
+    `{"type":"heading","heading":{...}}` instead of the schema this module uses,
+    so Telegram's `Can't find field "size"` — about the HEADING — was read as
+    "the media block is unsupported". Re-probed with `render.heading()` and with
+    no heading at all: both stored fine.
+
+    Locks the inner shape, because `media` is the field Telegram wants and every
+    plausible shorthand (`url`, bare string) is rejected."""
+    v = render.video("VID", caption="نسخه تماشایی")
+    assert v["type"] == "video"
+    assert v["video"] == {"type": "video", "media": "VID"}
+    assert v["caption"]["text"] == "نسخه تماشایی"
+
+    d = render.document("DOC", caption={"text": "پرونده"})
+    assert d["type"] == "document"
+    assert d["document"] == {"type": "document", "media": "DOC"}
+    assert d["caption"]["text"] == "پرونده"
+
+
+def test_upload_method_map_covers_video_and_document():
+    """`_upload` picks the send method from the FIELD name via a lookup; a missing
+    entry is a KeyError at publish time, in the middle of a live run."""
+    import inspect
+    src = inspect.getsource(telegram._upload)
+    for field, method in (("video", "sendVideo"), ("document", "sendDocument"),
+                          ("photo", "sendPhoto"), ("voice", "sendVoice"),
+                          ("audio", "sendAudio"), ("animation", "sendAnimation")):
+        assert f'"{field}": "{method}"' in src, field
+
+
+def test_dossier_document_sits_at_top_level_not_in_a_toggle():
+    """A `document` inside a collapsed toggle is invisible until tapped — the same
+    mistake that made a post with two photos read as «هیچ عکسی نیست»."""
+    payload = render.build([_story_ready()], "جمع‌بندی", dossier_id="DOCID")
+    top = [b["type"] for b in payload["blocks"]]
+    assert "document" in top, top
+
+
+def test_no_dossier_block_without_an_uploaded_pdf():
+    payload = render.build([_story_ready()], "جمع‌بندی")
+    assert "document" not in [b["type"] for b in _walk(payload["blocks"])]
+
+
+def test_dossier_is_not_on_every_theme():
+    """A block on every post stops being a feature and becomes wallpaper — the
+    reason the BibTeX cards are capped too."""
+    flags = [bool(t.get("dossier")) for t in render._THEMES]
+    assert any(flags) and not all(flags), flags
+
+
+def test_video_narration_needs_the_cards_so_it_is_uploaded_after_drawing():
+    """ORDERING BUG THIS LOCKS: the cards ARE the video's frames, so a `video`
+    slot cannot upload its narration in the audio stage like the other slots.
+    If the upload call ever moves back above the drawing stage the video ships
+    with a cover and nothing else, silently."""
+    import inspect
+    src = inspect.getsource(run_mod.main)
+    draw_at = src.index("story_card_specs")
+    video_at = src.index("upload_video")
+    assert video_at > draw_at, "upload_video must run after the cards are drawn"
+
+
+def test_briefing_audio_duration_is_parsed_from_ffmpeg_stderr():
+    """There is no ffprobe in the imageio-ffmpeg wheel, so the length comes out of
+    ffmpeg's own banner. A silent failure here would time the slideshow wrong."""
+    if not briefing.available():
+        pytest.skip("no ffmpeg")
+    assert briefing.audio_seconds("/nonexistent.mp3") == 0.0
+    assert briefing.audio_seconds("") == 0.0
+
+
+def test_briefing_encodes_a_playable_mp4_from_real_cards(tmp_path):
+    """End-to-end on real pixels: draw two cards, encode, and read the stream
+    properties back out of ffmpeg. Asserts an AUDIO stream exists, because that
+    is the whole difference between this and the silent `animation` chart."""
+    if not (briefing.available() and card.available()):
+        pytest.skip("no ffmpeg or no Pillow/shaper")
+    import subprocess as sp
+
+    c1 = card.build_story(rank=1, rank_fa="۱", section_fa="مدل‌ها",
+                          title_fa="عنوان آزمایشی یک", source_fa="آرکایو",
+                          palette=0, out_path=str(tmp_path / "c1.png"))
+    c2 = card.build_story(rank=2, rank_fa="۲", section_fa="سیاست",
+                          title_fa="عنوان آزمایشی دو", source_fa="رویترز",
+                          palette=3, out_path=str(tmp_path / "c2.png"))
+    assert c1 and c2
+
+    out = briefing.build(frames=[c1, c2], audio_path="", theme_index=1,
+                         out_path=str(tmp_path / "b.mp4"))
+    assert out and os.path.getsize(out) > briefing._MIN_BYTES
+    proc = sp.run([briefing._exe(), "-hide_banner", "-i", out],
+                  capture_output=True, text=True, timeout=120)
+    banner = proc.stderr
+    assert "Video: h264" in banner, banner[:400]
+    assert f"{briefing.VW}x{briefing.VH}" in banner, banner[:400]
+
+
+def test_briefing_is_bounded_by_the_narration_length(tmp_path):
+    """MEASURED FAILURE: `-shortest` did NOT bound the file. The concat demuxer
+    needs its last entry repeated (or the final card gets no hold time), that
+    repeat made the video stream outlive the audio, and the first encode ran
+    12.20s against a 9.31s narration — a player freezing on the last card for
+    three seconds. An explicit `-t` is what actually clips it."""
+    import inspect
+    src = inspect.getsource(briefing.build)
+    assert '"-t"' in src, "the encode must bound itself with -t, not -shortest"
+    assert "_TAIL" in src
+
+
+def test_briefing_covers_the_narration_by_cycling_cards(tmp_path):
+    """With few cards and a long narration the slideshow used to end early and
+    freeze. The cards must repeat enough times to cover the audio."""
+    import math as _m
+    frames = ["a.png", "b.png"]
+    hold = max(briefing._MIN_HOLD, min(briefing._MAX_HOLD, 30.0 / len(frames)))
+    reps = max(1, _m.ceil((30.0 + briefing._TAIL) / (hold * len(frames))))
+    assert reps >= 2, "a 30s narration over 2 cards must cycle them"
+
+
+def test_dossier_pdf_has_one_page_per_card(tmp_path):
+    """The PDF is what makes `document` worth shipping rather than a ticked box."""
+    if not card.available():
+        pytest.skip("no Pillow/shaper")
+    paths = []
+    for i in range(3):
+        p = card.build_story(rank=i + 1, rank_fa="۱", section_fa="ابزار",
+                             title_fa=f"عنوان {i}", source_fa="منبع",
+                             palette=i, out_path=str(tmp_path / f"c{i}.png"))
+        assert p
+        paths.append(p)
+    pdf = briefing.build_pdf(frames=paths, out_path=str(tmp_path / "d.pdf"))
+    assert pdf
+    data = open(pdf, "rb").read()
+    assert data[:5] == b"%PDF-"
+    pages = data.count(b"/Type /Page") - data.count(b"/Type /Pages")
+    assert pages == 3, pages
+
+
+def test_briefing_degrades_to_empty_string_not_an_exception():
+    """Same optional contract as the cover, the chart and the narration: a
+    bulletin must never fail to ship because a nice-to-have failed."""
+    assert briefing.build(frames=[], audio_path="") == ""
+    assert briefing.build(frames=["/nonexistent.png"]) == ""
+    assert briefing.build_pdf(frames=[]) == ""
+
+
+def test_frames_cover_every_story_but_cards_only_replace_missing_art():
+    """MEASURED FAILURE: a probe on a bulletin whose eight stories all carried
+    feed art drew ZERO cards, so the watchable edition was one static cover held
+    for 61 seconds of narration. The video needs a frame per story; the post
+    still must not replace a real photograph with a drawing."""
+    stories = [_story_ready("models"), _story_ready("policy"), _story_ready("tools")]
+    stories[0].image = "https://example.com/a.jpg"
+    stories[1].image = "https://example.com/b.jpg"
+    stories[2].image = ""          # `_story_ready` ships art by default
+
+    attach = render.story_card_specs(stories)
+    frames = render.story_card_specs(stories, include_art=True)
+
+    assert [i for i, _ in attach] == [2], "only the art-less story gets a card"
+    assert [i for i, _ in frames] == [0, 1, 2], "every story gets a frame"
+
+
+def test_run_draws_frames_for_all_stories_and_attaches_only_the_art_less():
+    """Locks the wiring, not just the helper: `run` must call the helper twice —
+    once for the attach set, once with include_art for the frames."""
+    import inspect
+    src = inspect.getsource(run_mod.main)
+    assert "story_card_specs(ready, include_art=True)" in src
+    assert "needs_card" in src
+    assert "if idx not in needs_card" in src
