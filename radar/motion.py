@@ -63,33 +63,43 @@ HOLD_MS = 900
 
 
 def _bar_chart(draw, *, t: float, rows: list[tuple[str, int]], palette, fonts) -> None:
-    """One frame: horizontal bars filling right-to-left to fraction `t`."""
+    """One frame: horizontal bars filling right-to-left to fraction `t`.
+
+    Layout is MEASURED, not assumed: the label column is as wide as the widest
+    label actually is (Persian section names run 200-280px at this font size,
+    vs the old hard-coded 150px). The bar zone starts left of every label, and
+    bars are drawn BEFORE the label text, so even a hypothetical overflow puts
+    ink on the bar — never a bar over the text (post-202 defect: «خط‌ها روی
+    متن می‌آورد»).
+    """
     top, bottom, accent, ink = palette
     f_title, f_label = fonts
     margin = 46
-    axis_x = W - margin - 150          # bars start (right) after the label column
 
     title = _shape("پخش خبرهای این بولتن")
     draw.text((W - margin - draw.textlength(title, font=f_title), 26),
               title, font=f_title, fill=ink)
     draw.line([(margin, 92), (W - margin, 92)], fill=accent + (110,), width=2)
 
+    label_w = [draw.textlength(_shape(lab), font=f_label) for lab, _ in rows]
+    axis_x = W - margin - (max(label_w) if label_w else 0) - 16
+    axis_x = max(axis_x, margin + 200)   # keep a usable chart area for short labels
     biggest = max((n for _, n in rows), default=1) or 1
-    y = 118
     span = axis_x - margin - 40
-    for label, n in rows:
+    y = 118
+    for i, (label, n) in enumerate(rows):
         shaped = _shape(label)
-        draw.text((W - margin - draw.textlength(shaped, font=f_label), y + 4),
-                  shaped, font=f_label, fill=ink)
         full = span * (n / biggest)
         w = full * t
         if w >= 1:
             draw.rectangle([axis_x - w, y, axis_x, y + 34], fill=accent)
-        # the count rides just past the bar's leading (left) edge
+        draw.text((W - margin - label_w[i], y + 4), shaped, font=f_label, fill=ink)
+        # the count rides just past the bar's leading (left) edge, clamped so a
+        # tiny bar cannot push it into the label column or off-frame
         if t > 0.75:
             cnt = _shape(str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")))
-            draw.text((axis_x - full - 14 - draw.textlength(cnt, font=f_label), y + 4),
-                      cnt, font=f_label, fill=accent)
+            cx = max(axis_x - full - 14 - draw.textlength(cnt, font=f_label), margin)
+            draw.text((cx, y + 4), cnt, font=f_label, fill=accent)
         y += 62
 
 

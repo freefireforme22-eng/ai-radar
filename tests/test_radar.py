@@ -2203,3 +2203,68 @@ def test_run_draws_frames_for_all_stories_and_attaches_only_the_art_less():
     assert "story_card_specs(ready, include_art=True)" in src
     assert "needs_card" in src
     assert "if idx not in needs_card" in src
+
+
+def test_motion_chart_bars_never_paint_over_labels():
+    """Post-202 user defect: the chart's bars overlapped the section labels
+    («خط‌ها روی متن می‌آورد»). The label column was hard-coded at 150px while
+    Persian section names measure 200-280px. Regression: layout must be
+    measured from the actual widest label, and in the final frame no
+    accent-coloured bar pixel may sit inside any label's text band."""
+    import importlib
+    from radar import motion, card
+    importlib.reload(motion)
+    from PIL import Image, ImageDraw, ImageFont
+
+    palette = card.PALETTES[0]
+    fonts = (ImageFont.truetype(card._BOLD, 40), ImageFont.truetype(card._REG, 30))
+    rows = [("مدل‌ها و پژوهش", 6), ("کسب‌وکار و سرمایه", 4),
+            ("امنیت و حریم خصوصی", 3), ("تراشه‌ها و سخت‌افزار", 2),
+            ("اینترنت و آزادی", 1)]
+
+    img = Image.new("RGB", (motion.W, motion.H))
+    d = ImageDraw.Draw(img, "RGBA")
+    motion._bar_chart(d, t=1.0, rows=rows, palette=palette, fonts=fonts)
+
+    f_label = fonts[1]
+    margin = 46
+    widest = max(d.textlength(motion._shape(lab), font=f_label) for lab, _ in rows)
+    axis_x = max(motion.W - margin - widest - 16, margin + 200)
+
+    accent = palette[2]
+    label_left_min = motion.W - margin - widest
+    bad = 0
+    for row_y in range(118, 118 + len(rows) * 62):
+        if row_y + 34 > motion.H:
+            break
+        for y in range(row_y, row_y + 34):
+            for x in range(int(axis_x) + 2, motion.W - margin):
+                c = img.getpixel((x, y))
+                if (abs(c[0]-accent[0]) < 12 and abs(c[1]-accent[1]) < 12
+                        and abs(c[2]-accent[2]) < 12):
+                    bad += 1
+    assert bad == 0, f"{bad} bar pixels painted inside the label band"
+
+
+def test_motion_chart_count_digits_stay_clear_of_labels():
+    """The bar count must never collide with the next label, even when a bar is
+    tiny and the label is long (the old code could push the count leftward)."""
+    from radar import motion, card
+    from PIL import Image, ImageDraw, ImageFont
+
+    palette = card.PALETTES[0]
+    fonts = (ImageFont.truetype(card._BOLD, 40), ImageFont.truetype(card._REG, 30))
+    d = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+    margin = 46
+    rows = [("امنیت و حریم خصوصی", 1), ("هوش مصنوعی", 9), ("ابزار", 2)]
+    label_w = [d.textlength(motion._shape(l), font=fonts[1]) for l, _ in rows]
+    axis_x = max(motion.W - margin - max(label_w) - 16, margin + 200)
+    span = axis_x - margin - 40
+    biggest = max(n for _, n in rows)
+    for (lab, n), lw in zip(rows, label_w):
+        full = span * (n / biggest)
+        cnt = motion._shape(str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")))
+        cnt_w = d.textlength(cnt, font=fonts[1])
+        cx = max(axis_x - full - 14 - cnt_w, margin)
+        gap = (motion.W - margin - lw) - (cx + cnt_w)
+        assert gap > 2, f"count for n={n} collides with its label (gap={gap:.0f}px)"
