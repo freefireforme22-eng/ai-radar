@@ -13,13 +13,19 @@ palettes: a reader scrolling the channel sees a different colour every slot.
 
 Two measured constraints shape the implementation:
 
-1. **PIL on this box has no complex-script shaping** — `PIL.features` reports
-   raqm=False, harfbuzz=False, fribidi=False. Arabic script drawn straight from
-   a Python string comes out as isolated, left-to-right letters. So text is
-   pre-shaped: `arabic_reshaper` maps letters to their presentation forms and
-   `python-bidi` reorders visually. Verified mechanically on «میلیارد» — shaped
-   gives 172px of ink with 1 interior gap, unshaped gives 240px with 5 gaps;
-   joined cursive is exactly what the narrower, gapless run means.
+1. **Shaping must match the layout engine, and the engine CHANGED under us.**
+   The original measurement (Pillow without raqm on this box) is now stale:
+   Pillow 12.3.0 — here and on the CI runner — ships the raqm layout engine
+   (`ImageFont.truetype(...).layout_engine == 1`, `features.check("raqm")` is
+   True). raqm performs bidi reordering AND Arabic shaping itself, so feeding
+   it pre-shaped text (arabic_reshaper + python-bidi) double-transforms it:
+   the letters stay joined but the word order comes out MIRRORED. Measured on
+   the live channel: post 185's video frame OCRs as «ی‌عونصم ش‌وه رادار» —
+   exactly the «به هم ریخته و اصلا خونده نمیشه» the user reported. Control:
+   the same string drawn raw through raqm OCRs correctly. Therefore `_shape`
+   is now ADAPTIVE — an identity function when raqm is present, the legacy
+   reshaper pipeline only when it is not. Every draw site already routes
+   through `_shape`, so one switch fixes all of them.
 
 2. **Vazirmatn carries no emoji or geometric glyphs** — measured ink for
    U+1F4CA, U+26A0, U+25A0, U+25CF is all zero. The theme marks used in the text
@@ -54,13 +60,37 @@ _REG = os.path.join(_FONT_DIR, "Vazirmatn-Regular.ttf")
 W, H = 1200, 630
 
 
-def _shape(text: str) -> str:
-    """Persian string → visually ordered presentation forms.
+def _raqm_active() -> bool:
+    """True when Pillow will shape+bidi the text itself at draw time.
 
-    Without this every card would read as disconnected mirror-image letters, and
-    it would still *look* like text at thumbnail size — which is exactly the kind
-    of defect that shipped to the channel before.
+    Pillow wheels >= 10.3 bundle libraqm. When the raqm layout engine is active,
+    `draw.text()` already applies bidi reordering and Arabic joining — feeding
+    it arabic_reshaper/python-bidi output transforms the string TWICE and the
+    render comes out mirrored (letters joined, word order reversed). Measured
+    live: the post-185 video frame — drawn through the old always-reshape path
+    on raqm-Pillow — OCRs as «ی‌عونصم ش‌وه رادار»; the same string drawn raw
+    through raqm OCRs correctly. The docstring history that claimed raqm=False
+    described an older container, not the current runner.
     """
+    try:
+        from PIL import features
+        return bool(features.check("raqm"))
+    except Exception:
+        return False
+
+
+def _shape(text: str) -> str:
+    """Persian string → glyphs ready for `draw.text`, ADAPTIVELY.
+
+    With raqm (current venv AND CI): return the text untouched — raqm does the
+    bidi reordering and contextual joining, and pre-shaped input is what
+    produced the mirrored «به هم ریخته» output the user reported. Without raqm
+    (the original environment this module was written for): pre-shape through
+    arabic_reshaper + python-bidi, because raw Arabic-script text drawn via the
+    BASIC engine comes out as disconnected left-to-right letters.
+    """
+    if _raqm_active():
+        return text
     import arabic_reshaper
     from bidi.algorithm import get_display
     return get_display(arabic_reshaper.reshape(text))

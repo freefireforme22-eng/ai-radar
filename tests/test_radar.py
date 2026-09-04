@@ -1471,20 +1471,65 @@ def test_card_build_is_a_noop_when_dependencies_are_missing(monkeypatch):
                       count_fa="۳", headlines=["الف"]) == ""
 
 
-def test_persian_on_the_card_is_reshaped_and_reordered():
-    """PIL on the runner has raqm=False/harfbuzz=False: no complex-script
-    shaping. Without pre-shaping, every card would carry disconnected,
-    left-to-right letters that still LOOK like text at thumbnail size."""
+def test_shape_matches_the_layout_engine_no_double_transform():
+    """Pillow wheels >= 10.3 bundle the raqm layout engine, which applies bidi
+    AND Arabic joining itself at draw time. Feeding it pre-shaped text
+    (arabic_reshaper + python-bidi) transforms the string twice: letters stay
+    joined but word order comes out MIRRORED. This is not hypothetical — the
+    live channel shipped it (post 185's video frame OCRs as «ی‌عونصم ش‌وه
+    رادار») and the user reported the cards as «به هم ریخته و اصلا خونده
+    نمیشه». The old test below asserted the OPPOSITE branch (always reshape),
+    which was true of the original container but stale once Pillow gained
+    raqm: the environment changed under us and nothing re-measured it.
+
+    With raqm active, `_shape` must be the identity — pre-shaping is the bug.
+    Without raqm, it must produce presentation forms (the original branch)."""
     import pytest
-    pytest.importorskip("arabic_reshaper")
-    pytest.importorskip("bidi")
     from radar import card
-    raw = "میلیارد"
-    shaped = card._shape(raw)
-    assert shaped != raw, "text went to the renderer unshaped"
-    # presentation forms live in the U+FB50..U+FEFF Arabic Presentation Forms blocks
-    assert any(0xFB50 <= ord(ch) <= 0xFEFF for ch in shaped)
-    assert shaped[0] != raw[0], "visual order was not reversed for RTL"
+
+    if card._raqm_active():
+        assert card._shape("رادار هوش مصنوعی") == "رادار هوش مصنوعی", \
+            "raqm is active: pre-shaping double-transforms and mirrors the text"
+    else:
+        pytest.importorskip("arabic_reshaper")
+        pytest.importorskip("bidi")
+        shaped = card._shape("میلیارد")
+        assert shaped != "میلیارد", "BASIC engine: text went to the renderer unshaped"
+        assert any(0xFB50 <= ord(ch) <= 0xFEFF for ch in shaped)
+
+
+def test_story_card_ocrs_back_as_forward_persian():
+    """Integration guard for the mirror regression, expressed the way the user
+    experienced it: draw a real story card through the real pipeline, read the
+    raster back with OCR, and require the Persian to read FORWARD. The mirrored
+    render (pre-reshape on raqm) fails this: the first title word comes back
+    reversed («راشتنا» instead of «انتشار»). OCR fuzziness is tolerated per
+    token — the assertion is on word ORDER, which mirroring always breaks, not
+    on glyph-perfect recognition, which even correct renders only approximate."""
+    pytest.importorskip("PIL")
+    from radar import card
+    if not card.available():
+        pytest.skip("card dependencies missing")
+    import subprocess
+    title = "انتشار مدل جدید Gemini با دقت ۹۴.۲ درصد"
+    p = card.build_story(rank=1, rank_fa="۱", section_fa="آزمایش",
+                         title_fa=title, source_fa="تست", metric="",
+                         palette=0, out_path="")
+    assert p, "story card did not render"
+    try:
+        r = subprocess.run(["tesseract", p, "stdout", "-l", "fas+eng", "--psm", "6"],
+                           capture_output=True, text=True, timeout=90)
+        text = " ".join(r.stdout.split())
+    except FileNotFoundError:
+        pytest.skip("tesseract not installed on this runner")
+    words = [w for w in title.split() if len(w) > 3]
+    # MIRROR signature: OCR returns each Persian word reversed in place or the
+    # word sequence flipped — either way the FORWARD word order breaks.
+    positions = [text.find(w) for w in words]
+    found = [i for i, pos in enumerate(positions) if pos >= 0]
+    assert len(found) >= 2, f"too little Persian recognised to judge order: {text!r}"
+    seq = [positions[i] for i in found]
+    assert seq == sorted(seq), f"word order not forward — mirrored render: {text!r}"
 
 
 def test_thin_triage_result_widens_the_window_too():

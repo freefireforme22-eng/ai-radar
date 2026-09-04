@@ -20,8 +20,13 @@ sections — rather than being decorative motion, and it is drawn in the same
 palette as the cover so a post stays visually one piece.
 
 Constraints measured on this box (identical to card.py): PIL has no complex-script
-shaping (raqm/harfbuzz/fribidi all False), so Persian is pre-shaped through
-arabic_reshaper + python-bidi; and Vazirmatn has no emoji outlines, so bars and
+shaping is delegated to `card._shape`, which is ADAPTIVE: Pillow 12.3 wheels
+bundle the raqm layout engine (`features.check("raqm")` is True here and on
+CI), and raqm applies bidi + joining itself — pre-shaping through
+arabic_reshaper + python-bidi then transforms the text TWICE and the render
+comes out mirrored (the live post-185 defect the user reported as «به هم
+ریخته»). On a Pillow without raqm, `_shape` falls back to the legacy
+pre-shaping. And Vazirmatn has no emoji outlines, so bars and
 ticks are PIL primitives.
 
 **The loop must be uploaded as MP4, not GIF.** `sendAnimation` accepts a GIF and
