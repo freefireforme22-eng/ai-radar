@@ -581,13 +581,54 @@ def test_consecutive_bulletins_do_not_look_identical():
     assert len(shapes) == 4, "two of four daily slots render the same theme"
 
 
+def test_no_collapsed_containers_in_the_bulletin():
+    """User request: remove «show more» — every toggle/quote renders fully open
+    so nothing hides behind a chevron or truncates. Locks: every `details`
+    block carries is_open=True and no `expandable_blockquote` survives."""
+    payload = render.build([_story_ready(), _story_ready("policy"),
+                            _story_ready("business")], "جمع‌بندی آزمایشی",
+                           cover_id="cov", motion_id="mot",
+                           narration_id="", narration_kind="audio",
+                           dossier_id="doc")
+    def walk(blocks):
+        for b in blocks:
+            t = b.get("type")
+            if t == "details":
+                assert b.get("is_open") is True, f"collapsed details: {b.get('summary')}"
+                walk(b.get("blocks", []))
+            elif t == "expandable_blockquote":
+                raise AssertionError("expandable_blockquote (show more) came back")
+            sub = b.get("blocks")
+            if isinstance(sub, list):
+                walk([x for x in sub if isinstance(x, dict)])
+            for v in b.values():
+                if isinstance(v, list):
+                    walk([x for x in v if isinstance(x, dict)])
+    walk(payload["blocks"])
+
+
 def test_each_section_gets_its_own_list_and_quote_style():
-    """Inside one bulletin, a research item must not read like a funding item."""
+    """Inside one bulletin, a research item must not read like a funding item.
+
+    Rewritten after the user's veto of the i./I./a. facts templates: the list
+    style is now uniform (decimal, their explicit preference), so the
+    per-section distinction that must survive is heading size + quote form."""
     from radar import render
     quotes = {v["quote"] for v in render._SECTION_STYLE.values()}
-    bullets = {v["bullet"] for v in render._SECTION_STYLE.values()}
+    sizes = {v["size"] for v in render._SECTION_STYLE.values()}
     assert len(quotes) >= 3, quotes
-    assert len(bullets) >= 3, bullets
+    assert len(sizes) == len(render._SECTION_STYLE), sizes
+
+    stories = [_story_ready("models"), _story_ready("business"),
+               _story_ready("policy"), _story_ready("tools")]
+    for i, s in enumerate(stories, 1):
+        blocks = render._story_blocks(s, i, render._SECTION_STYLE[s.section])
+        facts = [b for b in blocks if b.get("type") == "details"
+                 and "نکات کلیدی" in str(b.get("summary"))]
+        assert facts, f"section {s.section} lost its facts list"
+        lst = facts[0]["blocks"][0]
+        assert all(item["type"] == "1" for item in lst["items"]), \
+            "facts lists must use decimal numbering, not i./I./a."
 
 
 def test_photos_appear_at_top_level_not_only_inside_toggles():
@@ -1008,9 +1049,11 @@ def test_sections_have_genuinely_different_heading_sizes():
 
 
 def test_every_section_bullet_kind_is_a_documented_label_type():
-    documented = {"1", "a", "A", "i", "I"}
+    """Superseded: the per-section bullet templates were removed entirely after
+    the user's veto («بجای I ii») — facts lists are uniform decimal now. The
+    guard that remains: no section style may still carry a stray bullet key."""
     for key, style in render._SECTION_STYLE.items():
-        assert style["bullet"] in documented, key
+        assert "bullet" not in style, key
 
 
 # ── thin-bulletin guard (channel post 106 shipped ONE story) ──────────────

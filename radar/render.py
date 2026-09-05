@@ -423,10 +423,14 @@ _THEMES = [
 # gets the loudest heading, a research item the quietest, so one bulletin has
 # internal hierarchy as well as differing from the next bulletin.
 _SECTION_STYLE = {
-    "models":   {"size": 2, "quote": "expandable", "bullet": "i"},
-    "business": {"size": 3, "quote": "pullquote", "bullet": "1"},
-    "policy":   {"size": 4, "quote": "blockquote", "bullet": "a"},
-    "tools":    {"size": 5, "quote": "expandable", "bullet": "I"},
+    # `bullet` is GONE: the user vetoed the i./I./a. list templates for the
+    # key-points lists («از قالب استفاده کن بجای I ii») — every facts list now
+    # uses plain decimal numbering, so the per-section variety lives in the
+    # heading size and the quote form only.
+    "models":   {"size": 2, "quote": "expandable"},
+    "business": {"size": 3, "quote": "pullquote"},
+    "policy":   {"size": 4, "quote": "blockquote"},
+    "tools":    {"size": 5, "quote": "expandable"},
 }
 
 # Per-story card shapes. Rotating the BULLETIN layout fixed post-to-post
@@ -762,10 +766,11 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
                 [code(f"{i}".translate(_DIGITS)), " ", bold(s.title_fa)],
                 _story_blocks(s, i, style, with_image=s is not lead
                               and s.image not in gallery, shape=shape),
+                is_open=True,
             ))
         count = f"{len(group)}".translate(_DIGITS)
         blocks.append(details([bold(label), "  ", italic(f"({count} خبر)")],
-                              inner, is_open=first))
+                              inner, is_open=True))
         first = False
 
     blocks.append(divider())
@@ -787,7 +792,7 @@ def build(stories: list[Story], summary_fa: str = "", narration_id: str = "",
               caption=italic("شماره خبرها بر پایه رتبه در همین بولتن")),
         para([italic("همه منابع سرچشمه اصلی‌اند؛ رادار بازنشر نمی‌کند."), "  ",
               anchor_link("بازگشت به بالا ↑", "top")]),
-    ]))
+    ], is_open=True))
 
     blocks.append(footer([
         "رادار هوش مصنوعی  •  ",
@@ -810,7 +815,11 @@ def _digest_block(kind: str, text: str, credit: str = "جمع‌بندی سرد�
         return pullquote(text, credit=credit)
     if kind == "blockquote":
         return hard_quote([para(text)], credit=credit)
-    return quote(text, credit=credit)
+    # «expandable» USED to route here to the collapsible expandable_blockquote,
+    # which hides the digest behind a «نمایش بیشتر» chevron and truncates long
+    # text — the user asked for no collapsed containers and no clipped text
+    # anywhere, so every digest now renders fully visible.
+    return hard_quote([para(text)], credit=credit)
 
 
 def _source_counts(stories: list[Story]) -> list[tuple[str, int]]:
@@ -863,7 +872,8 @@ def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True,
     if s.citation:
         part["citation"] = [details([bold("📑 ارجاع علمی"), "  ",
                                      italic("برای نقل در مقاله")],
-                                    [pre(s.citation, language="bibtex")])]
+                                    [pre(s.citation, language="bibtex")],
+                                    is_open=True)]
 
     # At most one story per bulletin carries a map (enforced in `build`), so the
     # bulletin gets a visual element that is unique inside it.
@@ -875,14 +885,16 @@ def _story_blocks(s: Story, rank: int, style: dict, with_image: bool = True,
         # Tag each point with WHAT it is (عدد / مقایسه / ریسک / مقیاس / زمان)
         # instead of shipping five interchangeable sentences. The kind comes
         # from the same test that decides whether a point is worth keeping, so
-        # the label can never disagree with the filter.
+        # the label can never disagree with the filter. The list renders OPEN
+        # (no «نمایش بیشتر») and uses plain decimal numbering — the user vetoed
+        # the i. ii. / I. II. roman templates («بجای I ii»).
         labelled = []
         for f in s.facts:
             kind = facts_mod.primary_kind(f)
             labelled.append([bold(f"{_KIND_MARK.get(kind, '▸')} "), f] if kind else f)
         part["facts"] = [details([bold("🔍 نکات کلیدی"), "  ",
                                   italic(f"({len(s.facts)} نکته)".translate(_DIGITS))],
-                                 [numbered(labelled, kind=style["bullet"])], is_open=True)]
+                                 [numbered(labelled, kind="1")], is_open=True)]
 
     part["meta"] = [table([["منبع", "اهمیت", "زمان انتشار"],
                            [s.source, f"{s.score:.0f}".translate(_DIGITS) + "/۱۰",
