@@ -2262,8 +2262,10 @@ def test_motion_chart_bars_never_paint_over_labels():
     Persian section names measure 200-280px. Regression: layout must be
     measured from the actual widest label, and in the final frame no
     accent-coloured bar pixel may sit inside any label's text band."""
+    from radar import card, motion
+    if not card.available():
+        pytest.skip("no Pillow/shaper")
     import importlib
-    from radar import motion, card
     importlib.reload(motion)
     from PIL import Image, ImageDraw, ImageFont
 
@@ -2300,7 +2302,9 @@ def test_motion_chart_bars_never_paint_over_labels():
 def test_motion_chart_count_digits_stay_clear_of_labels():
     """The bar count must never collide with the next label, even when a bar is
     tiny and the label is long (the old code could push the count leftward)."""
-    from radar import motion, card
+    from radar import card, motion
+    if not card.available():
+        pytest.skip("no Pillow/shaper")
     from PIL import Image, ImageDraw, ImageFont
 
     palette = card.PALETTES[0]
