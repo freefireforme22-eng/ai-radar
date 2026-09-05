@@ -52,6 +52,13 @@ jobs:
       - name: Install cover-card dependencies
         run: pip install --quiet Pillow==12.3.0 arabic-reshaper==3.0.1 python-bidi==0.6.11
 
+      # The PDF dossier is now REAL text (fpdf2 + uharfbuzz shaping), not one
+      # rasterised card per page — that version the user measured as «فقط عکس
+      # تیترهاست و خبر خاصی توش نیست». Optional at runtime like everything else:
+      # if the import fails the bulletin falls back to the image bundle.
+      - name: Install dossier dependencies
+        run: pip install --quiet fpdf2==2.8.8 uharfbuzz==0.56.1
+
       # The animated chart is the only MOVING element. It must be uploaded as
       # h264 MP4, because Telegram downscales uploaded GIFs to 320px wide and
       # Persian labels are unreadable at that size (measured both ways). Neither

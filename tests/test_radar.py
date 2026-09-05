@@ -2170,6 +2170,57 @@ def test_dossier_pdf_has_one_page_per_card(tmp_path):
     assert pages == 3, pages
 
 
+def test_dossier_text_pdf_carries_real_content(tmp_path):
+    """The dossier must be a DOCUMENT, not a picture book. The card-per-page PDF
+    was measured by the user as «فقط عکس تیترهاست و خبر خاصی توش نیست» — every
+    page was a rasterised title card with zero readable text. The text edition
+    must carry the story content in a real (selectable, searchable) text layer."""
+    stories = [_story_ready("models"), _story_ready("business")]
+    out = briefing.build_text_pdf(stories=stories, out_path=str(tmp_path / "d.pdf"))
+    if not out:
+        pytest.skip("fpdf2/fonts unavailable")
+    import pymupdf
+    doc = pymupdf.open(out)
+    alltext = "".join(p.get_text() for p in doc)
+    import unicodedata
+    norm = unicodedata.normalize("NFKC", alltext)
+    joined = norm.replace("\u200c", "").replace("\n", " ")
+    # Persian content, labels and links must all be IN THE TEXT LAYER:
+    assert "Gemini" in joined, "story titles must appear as text, not pixels"
+    for s in stories:
+        assert s.url in alltext, "the full-text link must be present"
+    for label in ("نکات کلیدی", "چرا مهم است", "اگر درست باشد", "فهرست این شماره"):
+        assert label.replace("\u200c", "") in joined.replace("\u200c", ""), label
+
+
+def test_dossier_text_pdf_searchable_and_small(tmp_path):
+    """Searchability is the point: at least the plain single words must be found,
+    and the file must stay far smaller than ten raster pages."""
+    stories = [_story_ready("tools")]
+    stories[0].summary_fa = "شرکت OpenAI امروز مدل تازه خود را منتشر کرد و جزئیات کامل را در وبلاگ رسمی نوشت."
+    out = briefing.build_text_pdf(stories=stories, out_path=str(tmp_path / "s.pdf"))
+    if not out:
+        pytest.skip("fpdf2/fonts unavailable")
+    import pymupdf
+    doc = pymupdf.open(out)
+    pg = doc[0]
+    hits = sum(len(pg.search_for(w)) for w in ("شرکت", "مدل", "وبلاگ"))
+    assert hits >= 2, "single Persian words must be findable in the text layer"
+    assert os.path.getsize(out) < 400_000, "a text dossier must stay small"
+
+
+def test_run_prefers_the_text_dossier_over_the_card_bundle():
+    """Lock the wiring: the dossier call site must try build_text_pdf FIRST and
+    only fall back to the image bundle when it returns empty."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "radar", "run.py"), encoding="utf-8").read()
+    i_text = src.find("build_text_pdf(")
+    i_cards = src.find("build_pdf(frames=pages)")
+    assert i_text != -1, "run must build the text dossier"
+    assert i_cards != -1, "the card bundle remains as the fallback"
+    assert i_text < i_cards, "text edition is tried before the image bundle"
+
+
 def test_briefing_degrades_to_empty_string_not_an_exception():
     """Same optional contract as the cover, the chart and the narration: a
     bulletin must never fail to ship because a nice-to-have failed."""

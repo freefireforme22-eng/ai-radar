@@ -46,8 +46,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 
 from .card import PALETTES
+from .config import SECTIONS
 
 VW, VH = 1280, 720          # even dimensions, required by h264
 FPS = 5                     # a slideshow needs no more; keeps the file tiny
@@ -132,6 +134,159 @@ def build_pdf(*, frames: list[str], out_path: str = "") -> str:
                 im.close()
             except Exception:
                 pass
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
+        return ""
+    return out_path
+
+
+def _pdf_fonts(pdf) -> bool:
+    """Register the two Vazirmatn faces; False when the files are missing."""
+    try:
+        pdf.add_font("vazir", "", _FONT_REG)
+        pdf.add_font("vazir", "B", _FONT_BOLD)
+        return True
+    except Exception:
+        return False
+
+
+def _fd(*parts) -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "assets", *parts)
+
+
+_FONT_REG = _fd("Vazirmatn-Regular.ttf")
+_FONT_BOLD = _fd("Vazirmatn-Bold.ttf")
+
+
+def build_text_pdf(*, stories, cover_path: str = "", card_paths=None,
+                   out_path: str = "") -> str:
+    """The dossier as a REAL document: full Persian text, searchable, paged.
+
+    The previous dossier bundled the drawn cards as one image per page — which
+    the user measured correctly as «فقط عکس تیترهاست و خبر خاصی توش نیست»: a
+    title slide deck, not something to read offline. This version lays out the
+    actual bulletin content — summary, labelled key points, why-it-matters,
+    impact, the story's own drawn card as a header image — with fpdf2's harfbuzz
+    text shaping, so the text layer is real Unicode Persian: selectable,
+    copyable, searchable (verified with pymupdf `search_for`), and a fraction of
+    the byte size of ten raster pages.
+
+    Everything is optional, same contract as the rest of the module: no fpdf2,
+    no fonts, or any layout failure returns "" and the bulletin ships without
+    the dossier.
+    """
+    if not stories:
+        return ""
+    try:
+        from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
+    except Exception:
+        return ""
+
+    from .facts import primary_kind
+    from .render import _DIGITS, _jalali, _tehran_time_of
+
+    card_paths = list(card_paths or [])
+    out_path = out_path or os.path.join(tempfile.gettempdir(),
+                                        "radar_bulletin_text.pdf")
+
+    pdf = FPDF(format="A4")
+    pdf.set_auto_page_break(True, margin=16)
+    pdf.set_margins(16, 14, 16)
+    pdf.add_page()
+    if not _pdf_fonts(pdf):
+        return ""
+    pdf.set_text_shaping(True)   # harfbuzz: contextual joins + bidi, verified
+
+    REG, BOLD = ("vazir", ""), ("vazir", "B")
+    ACCENT = (94, 174, 255)
+    INK = (28, 34, 46)
+    SOFT = (108, 118, 132)
+
+    def para(text, size=10.5, style=REG, color=INK, align="R", lh=6.0):
+        pdf.set_font(*style, size)
+        pdf.set_text_color(*color)
+        pdf.multi_cell(0, lh, text, align=align,
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def rule(color=ACCENT, h=0.8):
+        pdf.set_draw_color(*color)
+        pdf.set_line_width(h)
+        y = pdf.get_y()
+        pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
+        pdf.ln(2.5)
+
+    # ---- cover page -------------------------------------------------------
+    if cover_path and os.path.exists(cover_path):
+        try:
+            pdf.image(cover_path, x=pdf.l_margin, w=pdf.epw)
+            pdf.ln(4)
+        except Exception:
+            pass
+    para("فهرست این شماره", 16, BOLD)
+    pdf.ln(1)
+    rule()
+    pdf.ln(1)
+    for i, s in enumerate(stories):
+        para(f"{(i + 1)}. {s.title_fa}", 10.5, BOLD)
+    pdf.ln(2)
+    now = datetime.now(timezone.utc)
+    para(f"تاریخ انتشار: {_jalali(now)} — نسخهٔ آفلاین بولتن رادار هوش مصنوعی "
+         f"با {len(stories)} خبر منتخب.".translate(_DIGITS),
+         9.5, REG, SOFT)
+    pdf.add_page()
+
+    # ---- story pages ------------------------------------------------------
+    for i, s in enumerate(stories):
+        if i:
+            pdf.add_page()
+        card = card_paths[i] if i < len(card_paths) else ""
+        if card and os.path.exists(card):
+            try:
+                pdf.image(card, x=pdf.l_margin, w=pdf.epw)
+                pdf.ln(3)
+            except Exception:
+                pass
+
+        section_fa = dict(SECTIONS).get(s.section, "")
+        para(section_fa, 9.5, REG, (94, 174, 255))
+        para(f"{(i + 1)}. {s.title_fa}".translate(_DIGITS), 15, BOLD)
+        pdf.ln(1)
+        rule()
+        if s.summary_fa:
+            pdf.ln(1)
+            para(s.summary_fa, 10.5)
+        if s.facts:
+            pdf.ln(1.5)
+            para("نکات کلیدی", 11.5, BOLD)
+            for f in s.facts:
+                kind = primary_kind(f)
+                para(f"• [{kind}] {f}" if kind else f"• {f}", 10, REG, INK)
+        if s.why_fa:
+            pdf.ln(1.5)
+            para("چرا مهم است", 11.5, BOLD)
+            para(s.why_fa, 10)
+        if s.impact_fa:
+            pdf.ln(1.5)
+            para("اگر درست باشد", 11.5, BOLD)
+            para(s.impact_fa, 10)
+        if s.metric_label and s.metric_value:
+            pdf.ln(1.5)
+            para(f"{s.metric_label}: {s.metric_value}", 11, BOLD, ACCENT)
+        pdf.ln(1.5)
+        rule(SOFT, 0.4)
+        para(f"منبع: {s.source_fa or s.source}   ·   اهمیت: "
+             f"{s.score:.0f}/۱۰   ·   انتشار: "
+             f"{_tehran_time_of(s.published)} به وقت تهران".translate(_DIGITS),
+             8.5, REG, SOFT)
+        if s.also_seen_in:
+            para("پوشش دیگر: " + "، ".join(s.also_seen_in), 8.5, REG, SOFT)
+        para(f"متن کامل: {s.url}", 8.5, REG, ACCENT)
+
+    try:
+        pdf.output(out_path)
+    except Exception:
+        return ""
     if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
         return ""
     return out_path

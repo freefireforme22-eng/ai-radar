@@ -315,7 +315,17 @@ def main(argv: list[str] | None = None) -> int:
 
         if render.current_dossier() and pages:
             log("building the PDF dossier...")
-            pdf = briefing.build_pdf(frames=pages)
+            # The dossier must be a document, not a picture book: the card-per-page
+            # bundle was measured by the user as «فقط عکس تیترهاست و خبر خاصی توش
+            # نیست» — correct. The text edition carries the full bulletin content
+            # with real (shaped, selectable) Persian, and only falls back to the
+            # image bundle when fpdf2/fonts are unavailable.
+            pdf = briefing.build_text_pdf(
+                stories=ready, cover_path=cover_path, card_paths=card_paths)
+            kind = "text"
+            if not pdf:
+                pdf = briefing.build_pdf(frames=pages)
+                kind = "cards"
             if pdf:
                 try:
                     dossier_id = telegram.upload_document(
@@ -328,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
                         os.unlink(pdf)
                     except OSError:
                         pass
-            log(f"  dossier attached ({len(pages)} pages)" if dossier_id
+            log(f"  dossier attached ({kind}, {len(ready)} stories)" if dossier_id
                 else "  dossier unavailable — bulletin ships without it")
 
         for p in card_paths:
